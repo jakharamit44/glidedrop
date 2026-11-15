@@ -31,7 +31,7 @@
   <meta name="twitter:image:alt" content="GlideDrop directional wing emblem and key technical specifications">
   <meta name="google-site-verification" content="ZfjkoJVb3_nkpyA_nXwogwJssYa-WpRgMVHEFQSscKs" />
 
-  <script type="application/ld+json">
+  <script id="ld-json-schema" type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@graph": [
@@ -51,9 +51,9 @@
         "url": "https://jakharamit44.github.io/glidedrop/",
         "image": "https://jakharamit44.github.io/glidedrop/og-image.png",
         "downloadUrl": [
-          "https://github.com/jakharamit44/glidedrop/releases/download/v2.6.0/GlideDrop-v2.6.0.apk",
-          "https://github.com/jakharamit44/glidedrop/releases/download/v2.6.0/GlideDrop-v2.6.0.pkg",
-          "https://github.com/jakharamit44/glidedrop/releases/download/v2.6.0/GlideDrop-v2.6.0.dmg"
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk",
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg",
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.dmg"
         ],
         "installUrl": "https://github.com/jakharamit44/glidedrop/releases/latest",
         "releaseNotes": "https://github.com/jakharamit44/glidedrop/blob/main/CHANGELOG.md",
@@ -135,7 +135,7 @@
             "name": "How do I avoid macOS Gatekeeper warnings when installing?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Install with GlideDrop-v2.6.0.pkg, which installs into /Applications and runs xattr -cr during setup. If you downloaded the .dmg, run the bundled Gatekeeper helper script or run xattr -cr \"/Applications/GlideDrop.app\" in Terminal."
+              "text": "Install with the latest GlideDrop .pkg installer, which installs into /Applications and runs xattr -cr during setup. If you downloaded the .dmg, run the bundled Gatekeeper helper script or run xattr -cr \"/Applications/GlideDrop.app\" in Terminal."
             }
           },
           {
@@ -980,17 +980,17 @@
           <div>
             <div class="release-pill">
               <span class="status-dot" aria-hidden="true"></span>
-              <span>Release v2.6.0 (Public Beta)</span>
+              <span id="hero-release-badge">Release v2.6.0 (Public Beta)</span>
             </div>
             <h1>Open-Source AirDrop Alternative for Android and Mac</h1>
             <p class="hero-lead">
               GlideDrop lets you send files between Android and Mac without Wi-Fi routers, USB cables, cloud accounts, or size limits. Built as a fast, encrypted alternative to Apple AirDrop&reg; and Google Quick Share&trade; over BLE L2CAP and 5 GHz Wi-Fi Direct.
             </p>
             <div class="cta-group">
-              <a class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
+              <a id="hero-apk-btn" class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
                 Download Android APK
               </a>
-              <a class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
+              <a id="hero-pkg-btn" class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
                 Download macOS PKG
               </a>
               <a class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop">
@@ -1000,7 +1000,7 @@
             <div class="hero-meta">
               <span>MIT License</span>
               <span>Android 12+ &amp; macOS 13+ (Apple Silicon &amp; Intel)</span>
-              <a href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>
+              <a id="hero-sha-link" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>
             </div>
           </div>
 
@@ -1063,7 +1063,7 @@
 
     <section id="downloads">
       <div class="container">
-        <h2>Download Release v2.6.0</h2>
+        <h2 id="downloads-heading">Download Release v2.6.0</h2>
         <p class="section-intro">
           Pre-built binaries are published on GitHub Releases with SHA-256 checksums. Both apps run natively without third-party transfer servers.
         </p>
@@ -1077,7 +1077,7 @@
               </p>
             </div>
             <div class="dl-actions">
-              <a class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
+              <a id="dl-apk-btn" class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
                 GlideDrop-v2.6.0.apk
               </a>
             </div>
@@ -1091,10 +1091,10 @@
               </p>
             </div>
             <div class="dl-actions">
-              <a class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
+              <a id="dl-pkg-btn" class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
                 GlideDrop-v2.6.0.pkg (Recommended)
               </a>
-              <a class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.dmg">
+              <a id="dl-dmg-btn" class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.dmg">
                 GlideDrop-v2.6.0.dmg
               </a>
             </div>
@@ -1103,7 +1103,7 @@
 
         <div class="note-box">
           <strong>Verify downloads &amp; Gatekeeper note:</strong> Check hashes against
-          <a href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>.
+          <a id="note-sha-link" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>.
           If you install from the unsigned <code>.dmg</code> and macOS says the app cannot be opened, run the bundled Gatekeeper script or clear the quarantine attribute:
           <div class="code-block">
             <pre id="gatekeeper-cmd">xattr -cr "/Applications/GlideDrop.app"</pre>
@@ -1300,7 +1300,7 @@
           </details>
           <details class="faq-item">
             <summary>How do I avoid macOS Gatekeeper warnings when installing?</summary>
-            <p>Install with <code>GlideDrop-v2.6.0.pkg</code>, which installs into <code>/Applications</code> and runs <code>xattr -cr</code> during setup. If you downloaded the <code>.dmg</code>, run the bundled Gatekeeper helper script or run <code>xattr -cr "/Applications/GlideDrop.app"</code> in Terminal.</p>
+            <p>Install with <code id="faq-pkg-name">GlideDrop-v2.6.0.pkg</code>, which installs into <code>/Applications</code> and runs <code>xattr -cr</code> during setup. If you downloaded the <code>.dmg</code>, run the bundled Gatekeeper helper script or run <code>xattr -cr "/Applications/GlideDrop.app"</code> in Terminal.</p>
           </details>
           <details class="faq-item">
             <summary>Does the AI summary feature send my private keys to the cloud?</summary>
@@ -1313,7 +1313,7 @@
 
   <footer>
     <div class="container footer-grid">
-      <div>GlideDrop v2.6.0 &middot; Open source under the MIT License</div>
+      <div id="footer-version-text">GlideDrop v2.6.0 &middot; Open source under the MIT License</div>
       <div class="footer-links">
         <a href="https://github.com/jakharamit44/glidedrop">GitHub</a>
         <a href="https://github.com/jakharamit44/glidedrop/releases">Releases</a>
@@ -1381,6 +1381,150 @@
           }
         });
       });
+    })();
+
+    (function () {
+      var REPO = 'jakharamit44/glidedrop';
+      var API_URL = 'https://api.github.com/repos/' + REPO + '/releases/latest';
+      var CACHE_KEY = 'glidedrop_latest_release_v1';
+      var CACHE_TTL_MS = 5 * 60 * 1000;
+
+      function applyReleaseData(release) {
+        if (!release || !release.tag_name) return;
+
+        var rawTag = String(release.tag_name).trim();
+        var versionTag = rawTag.charAt(0).toLowerCase() === 'v' ? rawTag : 'v' + rawTag;
+        var cleanVersion = versionTag.replace(/^v/i, '');
+        var isPreRelease = Boolean(release.prerelease);
+        var releaseLabel = isPreRelease ? ' (Pre-Release)' : ' (Public Beta)';
+
+        var baseDownload = 'https://github.com/' + REPO + '/releases/download/' + encodeURIComponent(rawTag);
+        var assets = Array.isArray(release.assets) ? release.assets : [];
+
+        function findAsset(ext, exactName) {
+          for (var i = 0; i < assets.length; i++) {
+            var asset = assets[i];
+            if (!asset || !asset.name || !asset.browser_download_url) continue;
+            if (exactName && asset.name === exactName) {
+              return { name: asset.name, url: asset.browser_download_url };
+            }
+            if (ext && asset.name.toLowerCase().endsWith(ext)) {
+              return { name: asset.name, url: asset.browser_download_url };
+            }
+          }
+          return null;
+        }
+
+        var apkAsset = findAsset('.apk') || {
+          name: 'GlideDrop-' + versionTag + '.apk',
+          url: baseDownload + '/GlideDrop-' + versionTag + '.apk'
+        };
+        var pkgAsset = findAsset('.pkg') || {
+          name: 'GlideDrop-' + versionTag + '.pkg',
+          url: baseDownload + '/GlideDrop-' + versionTag + '.pkg'
+        };
+        var dmgAsset = findAsset('.dmg') || {
+          name: 'GlideDrop-' + versionTag + '.dmg',
+          url: baseDownload + '/GlideDrop-' + versionTag + '.dmg'
+        };
+        var shaAsset = findAsset(null, 'SHA256SUMS.txt') || {
+          name: 'SHA256SUMS.txt',
+          url: baseDownload + '/SHA256SUMS.txt'
+        };
+
+        var heroBadge = document.getElementById('hero-release-badge');
+        if (heroBadge) heroBadge.textContent = 'Release ' + versionTag + releaseLabel;
+
+        var downloadsHeading = document.getElementById('downloads-heading');
+        if (downloadsHeading) downloadsHeading.textContent = 'Download Release ' + versionTag;
+
+        var heroApkBtn = document.getElementById('hero-apk-btn');
+        if (heroApkBtn) heroApkBtn.href = apkAsset.url;
+
+        var heroPkgBtn = document.getElementById('hero-pkg-btn');
+        if (heroPkgBtn) heroPkgBtn.href = pkgAsset.url;
+
+        var dlApkBtn = document.getElementById('dl-apk-btn');
+        if (dlApkBtn) {
+          dlApkBtn.href = apkAsset.url;
+          dlApkBtn.textContent = apkAsset.name;
+        }
+
+        var dlPkgBtn = document.getElementById('dl-pkg-btn');
+        if (dlPkgBtn) {
+          dlPkgBtn.href = pkgAsset.url;
+          dlPkgBtn.textContent = pkgAsset.name + ' (Recommended)';
+        }
+
+        var dlDmgBtn = document.getElementById('dl-dmg-btn');
+        if (dlDmgBtn) {
+          dlDmgBtn.href = dmgAsset.url;
+          dlDmgBtn.textContent = dmgAsset.name;
+        }
+
+        var heroShaLink = document.getElementById('hero-sha-link');
+        if (heroShaLink) heroShaLink.href = shaAsset.url;
+
+        var noteShaLink = document.getElementById('note-sha-link');
+        if (noteShaLink) noteShaLink.href = shaAsset.url;
+
+        var faqPkgName = document.getElementById('faq-pkg-name');
+        if (faqPkgName) faqPkgName.textContent = pkgAsset.name;
+
+        var footerText = document.getElementById('footer-version-text');
+        if (footerText) {
+          footerText.textContent = 'GlideDrop ' + versionTag + ' \u00B7 Open source under the MIT License';
+        }
+
+        var schemaEl = document.getElementById('ld-json-schema');
+        if (schemaEl) {
+          try {
+            var schema = JSON.parse(schemaEl.textContent);
+            if (schema && Array.isArray(schema['@graph'])) {
+              for (var j = 0; j < schema['@graph'].length; j++) {
+                var node = schema['@graph'][j];
+                if (node['@type'] === 'SoftwareApplication') {
+                  node.softwareVersion = cleanVersion;
+                  if (release.published_at) {
+                    node.datePublished = release.published_at.split('T')[0];
+                  }
+                  node.downloadUrl = [apkAsset.url, pkgAsset.url, dmgAsset.url];
+                  break;
+                }
+              }
+              schemaEl.textContent = JSON.stringify(schema);
+            }
+          } catch (e) {}
+        }
+      }
+
+      try {
+        var cachedRaw = sessionStorage.getItem(CACHE_KEY);
+        if (cachedRaw) {
+          var cached = JSON.parse(cachedRaw);
+          if (cached && cached.data && (Date.now() - cached.ts < CACHE_TTL_MS)) {
+            applyReleaseData(cached.data);
+            return;
+          }
+        }
+      } catch (e) {}
+
+      fetch(API_URL, {
+        headers: { 'Accept': 'application/vnd.github+json' }
+      })
+        .then(function (res) {
+          if (!res.ok) throw new Error('GitHub API status ' + res.status);
+          return res.json();
+        })
+        .then(function (data) {
+          applyReleaseData(data);
+          try {
+            sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data: data }));
+          } catch (e) {}
+        })
+        .catch(function () {
+          // Retain static HTML fallback on rate limit or network failure
+        });
     })();
   </script>
 </body>
