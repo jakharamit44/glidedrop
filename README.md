@@ -51,7 +51,7 @@ Android Device                                         macOS (Menu Bar + Daemon)
       |---------------------------------------------------------->|
       |  3. HTTPS stream (/Discover, /Ask, /Upload) on 5 GHz      |
       |     64-bit CPIO (070764) + 2.0s UDP ARP keepalive         |
-      |<=========================================================>|  45+ MB/s
+      |<=========================================================>|  65+ MB/s
       |  4. Optional SOCKS5 / HTTP CONNECT proxy on an OS-assigned port    |
       |<--------------------------------------------------------->|
       |  5. Clean Wi-Fi Direct teardown + CoreWLAN restore        |
@@ -74,7 +74,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for wire framing, CPIO headers,
 
 | Method | Shared Wi-Fi Required | USB Cable | Typical Speed | File Size Cap | Trade-offs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **GlideDrop** | No | No | 45+ MB/s (5 GHz) | None (64-bit CPIO) | Requires installing the app on Android and Mac |
+| **GlideDrop** | No | No | 65+ MB/s (5 GHz) | None (64-bit CPIO) | Requires installing the app on Android and Mac |
 | **LAN Tools (LocalSend / PairDrop)** | Yes | No | Router dependent | Device memory / app dependent | Fails when devices sit on different networks or AP client isolation is on |
 | **Quick Share / Nearby Share** | No (Android/Windows) | No | Wi-Fi Direct / BLE | None | No official Google Quick Share client for macOS |
 | **USB / MTP (Android File Transfer)** | No | Yes | 20 to 40 MB/s | None | Needs a cable and third-party MTP software on macOS |

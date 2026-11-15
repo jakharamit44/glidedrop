@@ -32,7 +32,7 @@ GlideDrop transfers files, links, and text notes directly between Android (API 3
        |     * POST /Discover (bplist00 capability negotiation)      |
        |     * POST /Ask (bplist00 file/URL metadata & approval)     |
        |     * POST /Upload (DVZip/CPIO chunked archive stream)      |
-       |<===========================================================>| (45+ MB/s)
+       |<===========================================================>| (65+ MB/s)
        |     * 2.0s UDP ARP keepalive over active P2P subnet         |
        |                                                             |
        |  5. Clean Teardown & Network Restore                        |
@@ -72,7 +72,7 @@ GlideDrop transfers files, links, and text notes directly between Android (API 3
 
 ### C. Kernel Neighbor Cache Keepalive
 
-Unidirectional HTTP uploads at 45+ MB/s can starve reverse ARP traffic, causing the Linux neighbor table on Android to mark the peer `STALE` after roughly 30 seconds and drop packets. During active 5 GHz sessions, `GlideDropNode` emits UDP keepalive pulses every 2.0 seconds to the peer's exchanged keepalive port over the `p2p-wlan0-*` network so the neighbor entry stays in `NUD_REACHABLE` throughout multi-gigabyte transfers.
+Unidirectional HTTP uploads at 65+ MB/s can starve reverse ARP traffic, causing the Linux neighbor table on Android to mark the peer `STALE` after roughly 30 seconds and drop packets. During active 5 GHz sessions, `GlideDropNode` emits UDP keepalive pulses every 2.0 seconds to the peer's exchanged keepalive port over the `p2p-wlan0-*` network so the neighbor entry stays in `NUD_REACHABLE` throughout multi-gigabyte transfers.
 
 ### D. Embedded Dual-Protocol Internet Proxy (OS-assigned port)
 
