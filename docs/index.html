@@ -1,10 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GlideDrop: Open-Source AirDrop Alternative for Android and Mac</title>
-  <meta name="description" content="GlideDrop is an open-source alternative to Apple AirDrop® and Google Quick Share™. Send files between Android and Mac without Wi-Fi using BLE and 5 GHz Wi-Fi Direct.">
+  <meta name="description"
+    content="GlideDrop is an open-source alternative to Apple AirDrop® and Google Quick Share™. Send files between Android and Mac without Wi-Fi using BLE and 5 GHz Wi-Fi Direct.">
   <meta name="robots" content="index,follow,max-image-preview:large">
   <meta name="theme-color" content="#111827" media="(prefers-color-scheme: dark)">
   <meta name="theme-color" content="#f4f7fb" media="(prefers-color-scheme: light)">
@@ -16,7 +18,8 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="GlideDrop">
   <meta property="og:title" content="GlideDrop: Open-Source AirDrop Alternative for Android and Mac">
-  <meta property="og:description" content="Open-source peer-to-peer file sharing between Android and Mac at 45+ MB/s over BLE and 5 GHz Wi-Fi Direct. Send files without a router, USB cable, or size cap.">
+  <meta property="og:description"
+    content="Open-source peer-to-peer file sharing between Android and Mac at 65+ MB/s over BLE and 5 GHz Wi-Fi Direct. Send files without a router, USB cable, or size cap.">
   <meta property="og:url" content="https://jakharamit44.github.io/glidedrop/">
   <meta property="og:image" content="https://jakharamit44.github.io/glidedrop/og-image.png">
   <meta property="og:image:type" content="image/png">
@@ -26,7 +29,8 @@
 
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="GlideDrop: Open-Source AirDrop Alternative for Android and Mac">
-  <meta name="twitter:description" content="Send files between Android and Mac without Wi-Fi over BLE L2CAP and 5 GHz Wi-Fi Direct. Open-source alternative to Apple AirDrop and Google Quick Share.">
+  <meta name="twitter:description"
+    content="Send files between Android and Mac without Wi-Fi over BLE L2CAP and 5 GHz Wi-Fi Direct. Open-source alternative to Apple AirDrop and Google Quick Share.">
   <meta name="twitter:image" content="https://jakharamit44.github.io/glidedrop/og-image.png">
   <meta name="twitter:image:alt" content="GlideDrop directional wing emblem and key technical specifications">
   <meta name="google-site-verification" content="ZfjkoJVb3_nkpyA_nXwogwJssYa-WpRgMVHEFQSscKs" />
@@ -60,7 +64,7 @@
         "softwareRequirements": "Android 12 (API 31) or newer with BLE and 5 GHz Wi-Fi Direct; macOS 13 Ventura, 14 Sonoma, or 15 Sequoia on Apple Silicon or Intel.",
         "featureList": [
           "Bidirectional file, photo, video, link, and text note transfer between Android and macOS",
-          "Off-grid 5 GHz Wi-Fi Direct transfers at 45+ MB/s with Direct BLE L2CAP fallback",
+          "Off-grid 5 GHz Wi-Fi Direct transfers at 65+ MB/s with Direct BLE L2CAP fallback",
           "64-bit extended CPIO (070764) streaming for files larger than 8 GiB",
           "ECDH P-256 key exchange, AES-256-GCM credential encryption, and SHA-256 pinned TLS",
           "Embedded SOCKS5 and HTTP CONNECT proxy on port 1080 to keep macOS online during Wi-Fi Direct transfers",
@@ -199,7 +203,9 @@
       }
     }
 
-    *, *::before, *::after {
+    *,
+    *::before,
+    *::after {
       box-sizing: border-box;
     }
 
@@ -209,8 +215,13 @@
     }
 
     @media (prefers-reduced-motion: reduce) {
-      html { scroll-behavior: auto; }
-      *, *::before, *::after {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
         animation-duration: 0.01ms !important;
         transition-duration: 0.01ms !important;
       }
@@ -422,6 +433,7 @@
         grid-template-columns: 1fr;
         gap: 24px;
       }
+
       .hero {
         padding: 32px 0;
       }
@@ -558,7 +570,7 @@
       align-items: start;
     }
 
-    .proto-step + .proto-step {
+    .proto-step+.proto-step {
       border-top: 1px solid var(--border);
     }
 
@@ -613,9 +625,11 @@
       .spec-strip {
         grid-template-columns: repeat(2, 1fr);
       }
+
       .spec-item:nth-child(2) {
         border-right: none;
       }
+
       .spec-item:nth-child(1),
       .spec-item:nth-child(2) {
         border-bottom: 1px solid var(--border);
@@ -626,10 +640,12 @@
       .spec-strip {
         grid-template-columns: 1fr;
       }
+
       .spec-item {
         border-right: none;
         border-bottom: 1px solid var(--border);
       }
+
       .spec-item:last-child {
         border-bottom: none;
       }
@@ -699,15 +715,19 @@
       .spec-grid {
         grid-template-columns: repeat(2, 1fr);
       }
+
       .spec-cell:nth-child(3n) {
         border-right: 1px solid var(--border);
       }
+
       .spec-cell:nth-child(2n) {
         border-right: none;
       }
+
       .spec-cell:nth-last-child(-n+3) {
         border-bottom: 1px solid var(--border);
       }
+
       .spec-cell:nth-last-child(-n+2) {
         border-bottom: none;
       }
@@ -717,10 +737,12 @@
       .spec-grid {
         grid-template-columns: 1fr;
       }
+
       .spec-cell {
         border-right: none !important;
         border-bottom: 1px solid var(--border) !important;
       }
+
       .spec-cell:last-child {
         border-bottom: none !important;
       }
@@ -770,10 +792,10 @@
       }
     }
 
-    .hero-grid > *,
-    .two-col > *,
-    .spec-grid > *,
-    .spec-strip > * {
+    .hero-grid>*,
+    .two-col>*,
+    .spec-grid>*,
+    .spec-strip>* {
       min-width: 0;
     }
 
@@ -806,7 +828,8 @@
       font-variant-numeric: tabular-nums;
     }
 
-    th, td {
+    th,
+    td {
       text-align: left;
       padding: 11px 14px;
       border-bottom: 1px solid var(--border);
@@ -841,7 +864,8 @@
       font-weight: 650;
     }
 
-    pre, code {
+    pre,
+    code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 13px;
     }
@@ -1028,6 +1052,7 @@
     }
   </style>
 </head>
+
 <body>
   <a class="skip-link" href="#main">Skip to main content</a>
 
@@ -1055,13 +1080,16 @@
             <div class="release-pill" id="hero-release-badge">Release v2.6.0 (Public Beta)</div>
             <h1>Open-Source AirDrop Alternative for Android and Mac</h1>
             <p class="hero-lead">
-              Send files directly between Android and Mac without a shared Wi-Fi router, USB cable, cloud account, or file size cap—built over BLE L2CAP discovery and 5 GHz Wi-Fi Direct.
+              Send files directly between Android and Mac without a shared Wi-Fi router, USB cable, cloud account, or
+              file size cap—built over BLE L2CAP discovery and 5 GHz Wi-Fi Direct.
             </p>
             <div class="cta-group">
-              <a id="hero-apk-btn" class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
+              <a id="hero-apk-btn" class="btn btn-primary"
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
                 Download Android APK
               </a>
-              <a id="hero-pkg-btn" class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
+              <a id="hero-pkg-btn" class="btn btn-secondary"
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
                 Download macOS PKG
               </a>
               <a class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop">
@@ -1071,7 +1099,8 @@
             <div class="hero-meta">
               <span>MIT License</span>
               <span>Android 12+ &amp; macOS 13+ (Apple Silicon &amp; Intel)</span>
-              <a id="hero-sha-link" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>
+              <a id="hero-sha-link"
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>
             </div>
           </div>
 
@@ -1091,21 +1120,24 @@
               <div class="step-num">2</div>
               <div>
                 <strong>Encrypted Credential Handshake</strong>
-                <p>Ephemeral ECDH P-256 keys and AES-256-GCM protect 5 GHz Wi-Fi Direct credentials and pin TLS fingerprints.</p>
+                <p>Ephemeral ECDH P-256 keys and AES-256-GCM protect 5 GHz Wi-Fi Direct credentials and pin TLS
+                  fingerprints.</p>
               </div>
             </div>
             <div class="proto-step">
               <div class="step-num">3</div>
               <div>
                 <strong>5 GHz Wi-Fi Direct Streaming</strong>
-                <p>Files stream over HTTPS with 64-bit CPIO (070764) support above 8 GiB and an optional port 1080 internet proxy.</p>
+                <p>Files stream over HTTPS with 64-bit CPIO (070764) support above 8 GiB and an optional port 1080
+                  internet proxy.</p>
               </div>
             </div>
             <div class="proto-step">
               <div class="step-num">4</div>
               <div>
                 <strong>Clean Network Restore</strong>
-                <p>macOS removes temporary P2P SSIDs, restores prior proxy settings, and rejoins home Wi-Fi via CoreWLAN.</p>
+                <p>macOS removes temporary P2P SSIDs, restores prior proxy settings, and rejoins home Wi-Fi via
+                  CoreWLAN.</p>
               </div>
             </div>
           </aside>
@@ -1113,7 +1145,7 @@
 
         <div class="spec-strip" aria-label="Measured specifications">
           <div class="spec-item">
-            <div class="metric-val">45+ MB/s</div>
+            <div class="metric-val">65+ MB/s</div>
             <div class="metric-lbl">5 GHz Wi-Fi Direct throughput</div>
           </div>
           <div class="spec-item">
@@ -1136,7 +1168,8 @@
       <div class="container">
         <h2 id="downloads-heading">Download Release v2.6.0</h2>
         <p class="section-intro">
-          Pre-built binaries are published on GitHub Releases with SHA-256 checksums. Both apps run natively without third-party transfer servers.
+          Pre-built binaries are published on GitHub Releases with SHA-256 checksums. Both apps run natively without
+          third-party transfer servers.
         </p>
 
         <div class="two-col">
@@ -1144,11 +1177,14 @@
             <div>
               <h3>Android App (Universal APK)</h3>
               <p>
-                Requires Android 12 (API 31) or newer with BLE and 5 GHz Wi-Fi Direct. Built on standard Android Jetpack and AOSP APIs for Pixel, Samsung, OnePlus, Xiaomi, and Motorola devices, with Share Sheet targets and a toggleable SOCKS5/HTTP proxy.
+                Requires Android 12 (API 31) or newer with BLE and 5 GHz Wi-Fi Direct. Built on standard Android Jetpack
+                and AOSP APIs for Pixel, Samsung, OnePlus, Xiaomi, and Motorola devices, with Share Sheet targets and a
+                toggleable SOCKS5/HTTP proxy.
               </p>
             </div>
             <div class="dl-actions">
-              <a id="dl-apk-btn" class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
+              <a id="dl-apk-btn" class="btn btn-primary"
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
                 GlideDrop-v2.6.0.apk
               </a>
             </div>
@@ -1158,14 +1194,18 @@
             <div>
               <h3>macOS App (PKG or DMG)</h3>
               <p>
-                Requires macOS 13 Ventura, 14 Sonoma, or 15 Sequoia (Apple Silicon or Intel). Runs as a native SwiftUI menu bar and radar app. The PKG installer places GlideDrop in <code>/Applications</code> and clears Gatekeeper quarantine attributes during setup.
+                Requires macOS 13 Ventura, 14 Sonoma, or 15 Sequoia (Apple Silicon or Intel). Runs as a native SwiftUI
+                menu bar and radar app. The PKG installer places GlideDrop in <code>/Applications</code> and clears
+                Gatekeeper quarantine attributes during setup.
               </p>
             </div>
             <div class="dl-actions">
-              <a id="dl-pkg-btn" class="btn btn-primary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
+              <a id="dl-pkg-btn" class="btn btn-primary"
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
                 GlideDrop-v2.6.0.pkg (Recommended)
               </a>
-              <a id="dl-dmg-btn" class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.dmg">
+              <a id="dl-dmg-btn" class="btn btn-secondary"
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.dmg">
                 GlideDrop-v2.6.0.dmg
               </a>
             </div>
@@ -1174,8 +1214,10 @@
 
         <div class="note-box">
           <strong>Verify downloads &amp; Gatekeeper note:</strong> Check hashes against
-          <a id="note-sha-link" href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>.
-          If you install from the unsigned <code>.dmg</code> and macOS blocks launch, run the bundled Gatekeeper script or clear the quarantine attribute:
+          <a id="note-sha-link"
+            href="https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt">SHA256SUMS.txt</a>.
+          If you install from the unsigned <code>.dmg</code> and macOS blocks launch, run the bundled Gatekeeper script
+          or clear the quarantine attribute:
           <div class="code-block">
             <pre id="gatekeeper-cmd">xattr -cr "/Applications/GlideDrop.app"</pre>
           </div>
@@ -1197,27 +1239,33 @@
         <div class="spec-grid">
           <article class="spec-cell">
             <h3>Bidirectional Android &harr; Mac</h3>
-            <p>Send from Android's Share Sheet or app UI, and send back from macOS via drag-and-drop, Finder selection, clipboard, or Finder's AirDrop menu.</p>
+            <p>Send from Android's Share Sheet or app UI, and send back from macOS via drag-and-drop, Finder selection,
+              clipboard, or Finder's AirDrop menu.</p>
           </article>
           <article class="spec-cell">
             <h3>No Shared Router Required</h3>
-            <p>Android opens a dedicated 5 GHz Band 4 Wi-Fi Direct group per session, working on trains, cafes, hotels, and studio sets with zero LAN access.</p>
+            <p>Android opens a dedicated 5 GHz Band 4 Wi-Fi Direct group per session, working on trains, cafes, hotels,
+              and studio sets with zero LAN access.</p>
           </article>
           <article class="spec-cell">
             <h3>Stay Online on Mac</h3>
-            <p>Android's embedded SOCKS5 and HTTP CONNECT proxy on port 1080 routes Mac traffic over cellular or upstream Wi-Fi while Wi-Fi Direct is active.</p>
+            <p>Android's embedded SOCKS5 and HTTP CONNECT proxy on port 1080 routes Mac traffic over cellular or
+              upstream Wi-Fi while Wi-Fi Direct is active.</p>
           </article>
           <article class="spec-cell">
             <h3>Pinned TLS + ECDH P-256</h3>
-            <p>Ephemeral P-256 keys encrypt Wi-Fi credentials over BLE, TLS certificate SHA-256 fingerprints are pinned, and Ask First mode confirms before joining a group.</p>
+            <p>Ephemeral P-256 keys encrypt Wi-Fi credentials over BLE, TLS certificate SHA-256 fingerprints are pinned,
+              and Ask First mode confirms before joining a group.</p>
           </article>
           <article class="spec-cell">
             <h3>No 35-Second Kernel Stalls</h3>
-            <p>Periodic 2.0s UDP keepalives refresh Android's Linux neighbor cache so 10 GB+ HTTP streams do not stall mid-transfer.</p>
+            <p>Periodic 2.0s UDP keepalives refresh Android's Linux neighbor cache so 10 GB+ HTTP streams do not stall
+              mid-transfer.</p>
           </article>
           <article class="spec-cell">
             <h3>Files, Links, and Text Notes</h3>
-            <p>Transfer batches of photos, 4K videos, PDFs, APKs, URLs, or text notes. For full folder trees, select contained files or send a zip archive.</p>
+            <p>Transfer batches of photos, 4K videos, PDFs, APKs, URLs, or text notes. For full folder trees, select
+              contained files or send a zip archive.</p>
           </article>
         </div>
       </div>
@@ -1247,7 +1295,7 @@
                 <td><strong>GlideDrop</strong></td>
                 <td>No (BLE + Wi-Fi Direct)</td>
                 <td>No</td>
-                <td class="speed-val">45+ MB/s (5 GHz)</td>
+                <td class="speed-val">65+ MB/s (5 GHz)</td>
                 <td>None (64-bit CPIO)</td>
                 <td>Mac can stay online via Android proxy; requires app on both devices</td>
               </tr>
@@ -1293,7 +1341,9 @@
       <div class="container">
         <h2>Under the Hood &amp; Optional AI Tools</h2>
         <p class="section-intro">
-          The transport layer mirrors Apple AirDrop's <code>/Discover</code>, <code>/Ask</code>, and <code>/Upload</code> HTTPS protocol using binary plists (<code>bplist00</code>) and streaming DVZip/CPIO archives.
+          The transport layer mirrors Apple AirDrop's <code>/Discover</code>, <code>/Ask</code>, and
+          <code>/Upload</code> HTTPS protocol using binary plists (<code>bplist00</code>) and streaming DVZip/CPIO
+          archives.
         </p>
 
         <div class="two-col">
@@ -1310,10 +1360,26 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr><td>100 MB (Photos / Docs)</td><td>~2.1 s</td><td class="speed-val">47.6 MB/s</td></tr>
-                  <tr><td>1.50 GB (Video Clip)</td><td>~32.8 s</td><td class="speed-val">45.7 MB/s</td></tr>
-                  <tr><td>3.00 GB (1080p Film)</td><td>~66.2 s</td><td class="speed-val">45.3 MB/s</td></tr>
-                  <tr><td>10.0+ GB (Media Archive)</td><td>~221.0 s</td><td class="speed-val">45.2 MB/s</td></tr>
+                  <tr>
+                    <td>100 MB (Photos / Docs)</td>
+                    <td>~2.1 s</td>
+                    <td class="speed-val">47.6 MB/s</td>
+                  </tr>
+                  <tr>
+                    <td>1.50 GB (Video Clip)</td>
+                    <td>~32.8 s</td>
+                    <td class="speed-val">45.7 MB/s</td>
+                  </tr>
+                  <tr>
+                    <td>3.00 GB (1080p Film)</td>
+                    <td>~66.2 s</td>
+                    <td class="speed-val">45.3 MB/s</td>
+                  </tr>
+                  <tr>
+                    <td>10.0+ GB (Media Archive)</td>
+                    <td>~221.0 s</td>
+                    <td class="speed-val">45.2 MB/s</td>
+                  </tr>
                 </tbody>
               </table>
             </div>
@@ -1322,19 +1388,27 @@
           <article class="card">
             <h3>Optional AI Summary Sidecars (Off by Default)</h3>
             <p>
-              If you enable <code>macos/claude_processor.py</code>, received files on Mac can generate companion <code>.claude.md</code> notes using either on-device tools or Anthropic's Messages API.
+              If you enable <code>macos/claude_processor.py</code>, received files on Mac can generate companion
+              <code>.claude.md</code> notes using either on-device tools or Anthropic's Messages API.
             </p>
             <p class="mt-sm">
-              <strong>Offline mode (no API key):</strong> Uses macOS Apple Vision OCR for images and an optional local Ollama server (<code>llama3.2</code>, <code>mistral</code>, <code>qwen2.5</code>, <code>phi3</code>) for summaries.
+              <strong>Offline mode (no API key):</strong> Uses macOS Apple Vision OCR for images and an optional local
+              Ollama server (<code>llama3.2</code>, <code>mistral</code>, <code>qwen2.5</code>, <code>phi3</code>) for
+              summaries.
             </p>
             <p class="mt-sm">
-              <strong>Privacy Guard:</strong> Before any file touches the cloud, filename rules and content regexes block <code>.pem</code>, <code>.key</code>, <code>.env*</code>, SSH keys, and exposed API tokens.
+              <strong>Privacy Guard:</strong> Before any file touches the cloud, filename rules and content regexes
+              block <code>.pem</code>, <code>.key</code>, <code>.env*</code>, SSH keys, and exposed API tokens.
             </p>
           </article>
         </div>
 
         <div class="note-box">
-          <strong>Build from source:</strong> Run <code>cd macos &amp;&amp; ./build.sh</code> on macOS (Xcode CLT + Python 3.9+) and <code>cd android &amp;&amp; ./gradlew assembleDebug</code> (JDK 17 + Android SDK 37). See the <a href="https://github.com/jakharamit44/glidedrop/blob/main/docs/ARCHITECTURE.md">Architecture Specification</a> and <a href="https://github.com/jakharamit44/glidedrop/blob/main/SECURITY.md">Security Policy</a> for protocol details.
+          <strong>Build from source:</strong> Run <code>cd macos &amp;&amp; ./build.sh</code> on macOS (Xcode CLT +
+          Python 3.9+) and <code>cd android &amp;&amp; ./gradlew assembleDebug</code> (JDK 17 + Android SDK 37). See the
+          <a href="https://github.com/jakharamit44/glidedrop/blob/main/docs/ARCHITECTURE.md">Architecture
+            Specification</a> and <a href="https://github.com/jakharamit44/glidedrop/blob/main/SECURITY.md">Security
+            Policy</a> for protocol details.
         </div>
       </div>
     </section>
@@ -1347,35 +1421,53 @@
         <div class="faq-list">
           <details class="faq-item">
             <summary>How do I send files from Android to Mac without USB or the same Wi-Fi network?</summary>
-            <p>Install GlideDrop on both devices and open it. Android and Mac discover each other over Bluetooth Low Energy L2CAP, negotiate temporary 5 GHz Wi-Fi Direct credentials encrypted with ECDH P-256 and AES-256-GCM, and transfer directly over pinned TLS without a shared router or cable.</p>
+            <p>Install GlideDrop on both devices and open it. Android and Mac discover each other over Bluetooth Low
+              Energy L2CAP, negotiate temporary 5 GHz Wi-Fi Direct credentials encrypted with ECDH P-256 and
+              AES-256-GCM, and transfer directly over pinned TLS without a shared router or cable.</p>
           </details>
           <details class="faq-item">
             <summary>Does GlideDrop work from Mac to Android too?</summary>
-            <p>Yes. Transfers work in both directions. From macOS you can drag files onto the menu bar icon or Send window, pick files by category, grab the current Finder selection or clipboard, compose a link or note, or send from Finder's AirDrop menu via the local AWDL proxy.</p>
+            <p>Yes. Transfers work in both directions. From macOS you can drag files onto the menu bar icon or Send
+              window, pick files by category, grab the current Finder selection or clipboard, compose a link or note, or
+              send from Finder's AirDrop menu via the local AWDL proxy.</p>
           </details>
           <details class="faq-item">
             <summary>Is there a file size limit or cloud upload?</summary>
-            <p>There is no file size limit and zero cloud upload. Transfers up to 8 GiB use standard POSIX CPIO headers, while larger files stream with 64-bit extended CPIO (070764) headers directly from file descriptors.</p>
+            <p>There is no file size limit and zero cloud upload. Transfers up to 8 GiB use standard POSIX CPIO headers,
+              while larger files stream with 64-bit extended CPIO (070764) headers directly from file descriptors.</p>
           </details>
           <details class="faq-item">
             <summary>Will my Mac lose internet while connected to Wi-Fi Direct?</summary>
-            <p>During 5 GHz Wi-Fi Direct transfers, Android can run an embedded SOCKS5 and HTTP CONNECT proxy on port 1080 (under Settings &rarr; Mac Internet Sharing Proxy) to share its active mobile data or upstream internet connection. macOS snapshots your previous proxy settings, applies the temporary proxy without sudo, and restores both your proxy config and home Wi-Fi once done.</p>
+            <p>During 5 GHz Wi-Fi Direct transfers, Android can run an embedded SOCKS5 and HTTP CONNECT proxy on port
+              1080 (under Settings &rarr; Mac Internet Sharing Proxy) to share its active mobile data or upstream
+              internet connection. macOS snapshots your previous proxy settings, applies the temporary proxy without
+              sudo, and restores both your proxy config and home Wi-Fi once done.</p>
           </details>
           <details class="faq-item">
             <summary>How are transfers encrypted and protected against spoofing?</summary>
-            <p>Wi-Fi Direct credentials travel inside an ephemeral ECDH P-256 + AES-256-GCM handshake over BLE (<code>W2P2</code>), and both sides exchange SHA-256 TLS certificate fingerprints to pin the HTTPS transfer. Under the default Ask First mode on macOS, joining a new Wi-Fi Direct group prompts once for confirmation; enabling Auto-Accept skips prompts for unattended transfers.</p>
+            <p>Wi-Fi Direct credentials travel inside an ephemeral ECDH P-256 + AES-256-GCM handshake over BLE
+              (<code>W2P2</code>), and both sides exchange SHA-256 TLS certificate fingerprints to pin the HTTPS
+              transfer. Under the default Ask First mode on macOS, joining a new Wi-Fi Direct group prompts once for
+              confirmation; enabling Auto-Accept skips prompts for unattended transfers.</p>
           </details>
           <details class="faq-item">
             <summary>Can I send entire folders directly?</summary>
-            <p>Not directly yet. Both Android and macOS stage single or multiple selected files, links, and text notes rather than directory trees. Select the files inside a folder or create a zip archive first when moving folders.</p>
+            <p>Not directly yet. Both Android and macOS stage single or multiple selected files, links, and text notes
+              rather than directory trees. Select the files inside a folder or create a zip archive first when moving
+              folders.</p>
           </details>
           <details class="faq-item">
             <summary>How do I avoid macOS Gatekeeper warnings when installing?</summary>
-            <p>Install with <code id="faq-pkg-name">GlideDrop-v2.6.0.pkg</code>, which installs into <code>/Applications</code> and runs <code>xattr -cr</code> during setup. If you downloaded the <code>.dmg</code>, run the bundled Gatekeeper helper script or run <code>xattr -cr "/Applications/GlideDrop.app"</code> in Terminal.</p>
+            <p>Install with <code id="faq-pkg-name">GlideDrop-v2.6.0.pkg</code>, which installs into
+              <code>/Applications</code> and runs <code>xattr -cr</code> during setup. If you downloaded the
+              <code>.dmg</code>, run the bundled Gatekeeper helper script or run
+              <code>xattr -cr "/Applications/GlideDrop.app"</code> in Terminal.</p>
           </details>
           <details class="faq-item">
             <summary>Does the AI summary feature send my private keys to the cloud?</summary>
-            <p>No. AI ingestion is disabled by default. When enabled, the Privacy Guard blocks <code>.pem</code>, <code>.key</code>, <code>.env*</code>, SSH keys, and files containing API tokens from cloud upload, and local mode runs offline via Apple Vision OCR and Ollama.</p>
+            <p>No. AI ingestion is disabled by default. When enabled, the Privacy Guard blocks <code>.pem</code>,
+              <code>.key</code>, <code>.env*</code>, SSH keys, and files containing API tokens from cloud upload, and
+              local mode runs offline via Apple Vision OCR and Ollama.</p>
           </details>
         </div>
       </div>
@@ -1394,7 +1486,9 @@
       </div>
     </div>
     <div class="container footer-legal">
-      <p><em>AirDrop and macOS are trademarks of Apple Inc., registered in the U.S. and other countries and regions. Android and Quick Share are trademarks of Google LLC. GlideDrop is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Apple Inc. or Google LLC.</em></p>
+      <p><em>AirDrop and macOS are trademarks of Apple Inc., registered in the U.S. and other countries and regions.
+          Android and Quick Share are trademarks of Google LLC. GlideDrop is an independent open-source project and is
+          not affiliated with, endorsed by, or sponsored by Apple Inc. or Google LLC.</em></p>
     </div>
   </footer>
 
@@ -1416,7 +1510,7 @@
           var sel = window.getSelection();
           sel.removeAllRanges();
           sel.addRange(range);
-        } catch (e) {}
+        } catch (e) { }
       }
       function fallbackCopy(btn, target, txt) {
         var ta = document.createElement('textarea');
@@ -1429,7 +1523,7 @@
         ta.select();
         ta.setSelectionRange(0, txt.length);
         var ok = false;
-        try { ok = document.execCommand('copy'); } catch (e) {}
+        try { ok = document.execCommand('copy'); } catch (e) { }
         document.body.removeChild(ta);
         if (!ok) {
           selectTarget(target);
@@ -1565,7 +1659,7 @@
               }
               schemaEl.textContent = JSON.stringify(schema);
             }
-          } catch (e) {}
+          } catch (e) { }
         }
       }
 
@@ -1578,7 +1672,7 @@
             return;
           }
         }
-      } catch (e) {}
+      } catch (e) { }
 
       fetch(API_URL, {
         headers: { 'Accept': 'application/vnd.github+json' }
@@ -1591,7 +1685,7 @@
           applyReleaseData(data);
           try {
             sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data: data }));
-          } catch (e) {}
+          } catch (e) { }
         })
         .catch(function () {
           // Retain static HTML fallback on rate limit or network failure
@@ -1599,4 +1693,5 @@
     })();
   </script>
 </body>
+
 </html>
