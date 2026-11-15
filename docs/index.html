@@ -6,8 +6,8 @@
   <title>GlideDrop: Open-Source AirDrop Alternative for Android and Mac</title>
   <meta name="description" content="GlideDrop is an open-source alternative to Apple AirDrop® and Google Quick Share™. Send files between Android and Mac without Wi-Fi using BLE and 5 GHz Wi-Fi Direct.">
   <meta name="robots" content="index,follow,max-image-preview:large">
-  <meta name="theme-color" content="#090c10" media="(prefers-color-scheme: dark)">
-  <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111827" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f7fb" media="(prefers-color-scheme: light)">
   <link rel="canonical" href="https://jakharamit44.github.io/glidedrop/">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -154,38 +154,48 @@
 
   <style>
     :root {
-      --bg: #090c10;
-      --bg-elev: #0f1319;
-      --bg-card: #131820;
-      --bg-card-hover: #181f29;
-      --border: #212834;
-      --border-strong: #323c4e;
-      --text: #f0f4f8;
-      --text-muted: #9aa5b4;
-      --text-dim: #7b8794;
+      --bg: #111827;
+      --bg-elev: #182234;
+      --bg-card: #1e293b;
+      --bg-card-hover: #263349;
+      --border: #2c3a52;
+      --border-strong: #3e506e;
+      --text: #f1f5f9;
+      --text-muted: #cbd5e1;
+      --text-dim: #94a3b8;
       --accent: #3b82f6;
       --accent-hover: #2563eb;
-      --accent-text: #60a5fa;
-      --code-bg: #0c1016;
+      --accent-text: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.12);
+      --accent-border: rgba(56, 189, 248, 0.28);
+      --emerald: #34d399;
+      --emerald-soft: rgba(16, 185, 129, 0.14);
+      --emerald-border: rgba(16, 185, 129, 0.32);
+      --code-bg: #131c2e;
       --radius: 10px;
       --max-w: 1080px;
     }
 
     @media (prefers-color-scheme: light) {
       :root {
-        --bg: #f8fafc;
+        --bg: #f4f7fb;
         --bg-elev: #ffffff;
         --bg-card: #ffffff;
         --bg-card-hover: #f1f5f9;
-        --border: #e2e8f0;
-        --border-strong: #cbd5e1;
+        --border: #dbe4f0;
+        --border-strong: #bfd0e6;
         --text: #0f172a;
-        --text-muted: #475569;
+        --text-muted: #334155;
         --text-dim: #64748b;
         --accent: #2563eb;
         --accent-hover: #1d4ed8;
-        --accent-text: #1d4ed8;
-        --code-bg: #f1f5f9;
+        --accent-text: #0284c7;
+        --accent-soft: rgba(2, 132, 199, 0.08);
+        --accent-border: rgba(2, 132, 199, 0.24);
+        --emerald: #047857;
+        --emerald-soft: rgba(5, 150, 105, 0.10);
+        --emerald-border: rgba(5, 150, 105, 0.28);
+        --code-bg: #eef3f9;
       }
     }
 
@@ -318,7 +328,7 @@
 
     .nav-cta {
       background: var(--bg-card);
-      border: 1px solid var(--border);
+      border: 1px solid var(--border-strong);
       border-radius: 8px;
       padding: 6px 12px;
       min-height: 36px;
@@ -332,7 +342,7 @@
     }
 
     .nav-cta:hover {
-      border-color: var(--border-strong);
+      border-color: var(--accent-text);
       background: var(--bg-card-hover);
       text-decoration: none;
     }
@@ -397,6 +407,7 @@
     .hero {
       padding: 48px 0 40px;
       border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(56, 189, 248, 0.05) 0%, transparent 100%);
     }
 
     .hero-grid {
@@ -421,12 +432,12 @@
       align-items: center;
       padding: 4px 10px;
       border-radius: 6px;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
+      background: var(--emerald-soft);
+      border: 1px solid var(--emerald-border);
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 12px;
       font-weight: 600;
-      color: var(--text-muted);
+      color: var(--emerald);
       margin-bottom: 14px;
     }
 
@@ -489,6 +500,7 @@
 
     .btn-secondary:hover {
       background: var(--bg-card-hover);
+      border-color: var(--accent-text);
     }
 
     .hero-meta {
@@ -500,7 +512,7 @@
     }
 
     .hero-meta a {
-      color: var(--text-muted);
+      color: var(--accent-text);
       text-decoration: underline;
       text-decoration-color: var(--border-strong);
       text-underline-offset: 3px;
@@ -532,9 +544,9 @@
       font-size: 11px;
       padding: 2px 7px;
       border-radius: 4px;
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      color: var(--text-muted);
+      background: var(--emerald-soft);
+      border: 1px solid var(--emerald-border);
+      color: var(--emerald);
       white-space: nowrap;
     }
 
@@ -554,15 +566,15 @@
       width: 24px;
       height: 24px;
       border-radius: 5px;
-      background: var(--code-bg);
-      border: 1px solid var(--border);
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-border);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 12px;
       font-weight: 700;
-      color: var(--text-muted);
+      color: var(--accent-text);
     }
 
     .proto-step strong {
@@ -628,6 +640,7 @@
       font-weight: 750;
       letter-spacing: -0.015em;
       font-variant-numeric: tabular-nums;
+      color: var(--accent-text);
       margin-bottom: 2px;
     }
 
@@ -717,6 +730,7 @@
       margin: 0 0 6px;
       font-size: 15px;
       font-weight: 700;
+      color: var(--text);
     }
 
     .spec-cell p {
@@ -810,12 +824,21 @@
       border-bottom: none;
     }
 
+    tr.row-highlight td {
+      background: var(--accent-soft);
+    }
+
     td {
       color: var(--text-muted);
     }
 
     td strong {
       color: var(--text);
+    }
+
+    td.speed-val {
+      color: var(--accent-text);
+      font-weight: 650;
     }
 
     pre, code {
@@ -826,6 +849,7 @@
     code {
       background: var(--code-bg);
       border: 1px solid var(--border);
+      color: var(--accent-text);
       padding: 1px 5px;
       border-radius: 5px;
     }
@@ -869,6 +893,7 @@
 
     .copy-btn:hover {
       background: var(--bg-card-hover);
+      border-color: var(--accent-text);
     }
 
     .dl-card {
@@ -950,7 +975,7 @@
       content: "+";
       font-size: 18px;
       font-weight: 500;
-      color: var(--text-muted);
+      color: var(--accent-text);
       flex-shrink: 0;
     }
 
@@ -1218,11 +1243,11 @@
               </tr>
             </thead>
             <tbody>
-              <tr>
+              <tr class="row-highlight">
                 <td><strong>GlideDrop</strong></td>
                 <td>No (BLE + Wi-Fi Direct)</td>
                 <td>No</td>
-                <td>45+ MB/s (5 GHz)</td>
+                <td class="speed-val">45+ MB/s (5 GHz)</td>
                 <td>None (64-bit CPIO)</td>
                 <td>Mac can stay online via Android proxy; requires app on both devices</td>
               </tr>
@@ -1285,10 +1310,10 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr><td>100 MB (Photos / Docs)</td><td>~2.1 s</td><td>47.6 MB/s</td></tr>
-                  <tr><td>1.50 GB (Video Clip)</td><td>~32.8 s</td><td>45.7 MB/s</td></tr>
-                  <tr><td>3.00 GB (1080p Film)</td><td>~66.2 s</td><td>45.3 MB/s</td></tr>
-                  <tr><td>10.0+ GB (Media Archive)</td><td>~221.0 s</td><td>45.2 MB/s</td></tr>
+                  <tr><td>100 MB (Photos / Docs)</td><td>~2.1 s</td><td class="speed-val">47.6 MB/s</td></tr>
+                  <tr><td>1.50 GB (Video Clip)</td><td>~32.8 s</td><td class="speed-val">45.7 MB/s</td></tr>
+                  <tr><td>3.00 GB (1080p Film)</td><td>~66.2 s</td><td class="speed-val">45.3 MB/s</td></tr>
+                  <tr><td>10.0+ GB (Media Archive)</td><td>~221.0 s</td><td class="speed-val">45.2 MB/s</td></tr>
                 </tbody>
               </table>
             </div>
