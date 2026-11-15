@@ -1340,6 +1340,34 @@ struct GlideDropDaemonTests {
             check(!FileManager.default.fileExists(atPath: log.path), "Clear on All removes the history log")
             check(FileManager.default.fileExists(atPath: payload.path), "Clearing history never deletes transferred files")
         }
+
+        // 13. Security hardening regression checks (CodeQL alerts #5, #6, #7)
+        do {
+            let secDir = FileManager.default.temporaryDirectory.appendingPathComponent("gd-sec-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: secDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: secDir) }
+
+            // Path injection: arbitrary finder_proxy_sock contents must be ignored
+            try? "/etc/passwd".write(to: secDir.appendingPathComponent("finder_proxy_sock"), atomically: true, encoding: .utf8)
+            let resolved = readFinderProxySockPath(stateDir: secDir)
+            let expectedSock = secDir.standardizedFileURL.appendingPathComponent("finder_proxy.sock").path
+            check(resolved == expectedSock, "readFinderProxySockPath must always return canonical finder_proxy.sock inside stateDir")
+
+            // Command-line injection: saved home Wi-Fi SSID is stored & cleared in-memory
+            setSavedHomeWifiSsid("MyHomeWiFi")
+            check(getSavedHomeWifiSsid() == "MyHomeWiFi", "setSavedHomeWifiSsid/getSavedHomeWifiSsid must store SSID in memory")
+            setSavedHomeWifiSsid("")
+            check(getSavedHomeWifiSsid().isEmpty, "setSavedHomeWifiSsid(\"\") must clear stored SSID")
+
+            // Silent control stream write helper
+            let memStream = OutputStream.toMemory()
+            memStream.open()
+            let okCtrl = writeControlBytes(memStream, data: Data("OK\tPIN\n".utf8))
+            memStream.close()
+            let writtenData = memStream.property(forKey: .dataWrittenToMemoryStreamKey) as? Data
+            check(okCtrl && writtenData == Data("OK\tPIN\n".utf8), "writeControlBytes must write exact bytes to an open OutputStream")
+            print("[PASS] Security hardening regressions (canonical socket path, in-memory SSID, writeControlBytes)")
+        }
         if failures > 0 {
             fputs("[SUMMARY] \(failures) Swift regression check(s) FAILED\n", stderr)
             exit(1)

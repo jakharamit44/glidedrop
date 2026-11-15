@@ -434,34 +434,29 @@ func isAllowedAwdlEndpoint(_ endpoint: NWEndpoint?) -> Bool {
 }
 
 func readFinderProxySockPath(stateDir: URL = STATE_DIR) -> String {
-    let file = stateDir.appendingPathComponent("finder_proxy_sock")
-    if let raw = try? String(contentsOf: file, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-       !raw.isEmpty {
-        return raw
-    }
-    return stateDir.appendingPathComponent("finder_proxy.sock").path
+    return stateDir.standardizedFileURL.appendingPathComponent("finder_proxy.sock").path
 }
 
-func ensureLocalMacTlsCertFiles() {
-    let certPath = STATE_DIR.appendingPathComponent("cert.pem")
-    let keyPath = STATE_DIR.appendingPathComponent("key.pem")
-    if !FileManager.default.fileExists(atPath: certPath.path) || !FileManager.default.fileExists(atPath: keyPath.path) {
+func ensureLocalMacEndpointFiles() {
+    let pubPemPath = STATE_DIR.appendingPathComponent("cert.pem")
+    let privPemPath = STATE_DIR.appendingPathComponent("key.pem")
+    if !FileManager.default.fileExists(atPath: pubPemPath.path) || !FileManager.default.fileExists(atPath: privPemPath.path) {
         try? FileManager.default.createDirectory(at: STATE_DIR, withIntermediateDirectories: true)
         _ = runProcessCapture("/usr/bin/openssl", [
             "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-            "-keyout", keyPath.path, "-out", certPath.path,
+            "-keyout", privPemPath.path, "-out", pubPemPath.path,
             "-days", "3650", "-nodes", "-subj", "/CN=glidedrop"
         ])
     }
 }
 
-func getLocalMacTlsCertFingerprint() -> String {
-    let certPath = STATE_DIR.appendingPathComponent("cert.pem")
-    let keyPath = STATE_DIR.appendingPathComponent("key.pem")
-    if !FileManager.default.fileExists(atPath: certPath.path) || !FileManager.default.fileExists(atPath: keyPath.path) {
-        ensureLocalMacTlsCertFiles()
+func computeLocalMacSha256Pin() -> String {
+    let pubPemPath = STATE_DIR.appendingPathComponent("cert.pem")
+    let privPemPath = STATE_DIR.appendingPathComponent("key.pem")
+    if !FileManager.default.fileExists(atPath: pubPemPath.path) || !FileManager.default.fileExists(atPath: privPemPath.path) {
+        ensureLocalMacEndpointFiles()
     }
-    guard let pemStr = try? String(contentsOf: certPath, encoding: .utf8) else { return "" }
+    guard let pemStr = try? String(contentsOf: pubPemPath, encoding: .utf8) else { return "" }
     let lines = pemStr.components(separatedBy: .newlines)
     let b64 = lines.filter { !$0.hasPrefix("-----") && !$0.isEmpty }.joined()
     guard let der = Data(base64Encoded: b64, options: .ignoreUnknownCharacters), !der.isEmpty else { return "" }
@@ -1442,16 +1437,34 @@ func requestLocationAuthorizationForWifi(timeout: TimeInterval = 8.0) -> Bool {
     return false
 }
 
+private let savedHomeWifiLock = NSLock()
+private var savedHomeWifiSsid: String = ""
+
+func setSavedHomeWifiSsid(_ ssid: String) {
+    savedHomeWifiLock.lock()
+    savedHomeWifiSsid = ssid
+    savedHomeWifiLock.unlock()
+}
+
+func getSavedHomeWifiSsid() -> String {
+    savedHomeWifiLock.lock()
+    let value = savedHomeWifiSsid
+    savedHomeWifiLock.unlock()
+    return value
+}
+
 func saveCurrentWifiSsid() {
     requestLocationAuthorizationForWifi()
     // Record only from reliable data (a readable, non-P2P current association). Never guess from the
     // preferred list; if the name is hidden, restore falls back to re-enabling auto-join.
     let ssid = currentWifiSsid()
     if ssid.isEmpty {
+        setSavedHomeWifiSsid("")
         if !currentRawWifiSsid().hasPrefix("DIRECT-") { try? FileManager.default.removeItem(at: PREV_WIFI_FILE) }
         print("[BLE-Daemon] Home Wi-Fi name unavailable; will restore by re-enabling auto-join.")
         fflush(stdout)
     } else {
+        setSavedHomeWifiSsid(ssid)
         try? ssid.write(to: PREV_WIFI_FILE, atomically: true, encoding: .utf8)
         print("[BLE-Daemon] Preserved home Wi-Fi network: '\(ssid)'")
         fflush(stdout)
@@ -1867,10 +1880,12 @@ func restoreMacInternetWifi(ssid: String = "DIRECT-") {
     // 2. Check if iface is already back on normal Wi-Fi or was never on P2P
     let curSsid = currentRawWifiSsid()
     let onP2p = curSsid.hasPrefix("DIRECT-") || !currentWifiP2pIp(matchingGateway: activeSession?.gatewayIp, matchingCidr: activeSession?.cidr).isEmpty
-    let savedSsid = (try? String(contentsOf: PREV_WIFI_FILE, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    if !onP2p && (wifiHasNormalIpv4() || savedSsid.isEmpty) {
+    let savedSsid = getSavedHomeWifiSsid().trimmingCharacters(in: .whitespacesAndNewlines)
+    let hasSavedWifiState = !savedSsid.isEmpty || FileManager.default.fileExists(atPath: PREV_WIFI_FILE.path)
+    if !onP2p && (wifiHasNormalIpv4() || !hasSavedWifiState) {
         print("[BLE-Daemon] \(iface) already on normal Wi-Fi ('\(curSsid)'). P2P cleanup completed.")
         fflush(stdout)
+        setSavedHomeWifiSsid("")
         try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
         clearActiveP2pSession()
         resumeCloudflareWarpIfNeeded()
@@ -1880,6 +1895,7 @@ func restoreMacInternetWifi(ssid: String = "DIRECT-") {
     if wifiHasNormalIpv4() && !onP2p {
         print("[BLE-Daemon] \(iface) connected to normal Wi-Fi. P2P removed from preferred list.")
         fflush(stdout)
+        setSavedHomeWifiSsid("")
         try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
         clearActiveP2pSession()
         resumeCloudflareWarpIfNeeded()
@@ -1891,7 +1907,7 @@ func restoreMacInternetWifi(ssid: String = "DIRECT-") {
 
     // 3. Resolve target home network to restore
     // Only a network recorded from reliable data is restored by name; never guess from the preferred list.
-    let targetSsid = (!savedSsid.isEmpty && !savedSsid.hasPrefix("DIRECT-")) ? savedSsid : ""
+    let targetSsid = (!savedSsid.isEmpty && !savedSsid.hasPrefix("DIRECT-") && !savedSsid.hasPrefix("-")) ? savedSsid : ""
 
     // 4. Disassociate iface using CoreWLAN to cleanly detach from P2P when still on P2P
     if onP2p {
@@ -1925,6 +1941,7 @@ func restoreMacInternetWifi(ssid: String = "DIRECT-") {
         Thread.sleep(forTimeInterval: 0.25)
     }
 
+    setSavedHomeWifiSsid("")
     try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
     clearActiveP2pSession()
     resumeCloudflareWarpIfNeeded()
@@ -2089,6 +2106,33 @@ func readExact(
     }
 }
 
+func writeControlBytes(_ stream: OutputStream, data: Data) -> Bool {
+    var offset = 0
+    let total = data.count
+    var idleLoops = 0
+    while offset < total {
+        if !stream.hasSpaceAvailable {
+            Thread.sleep(forTimeInterval: 0.001)
+            idleLoops += 1
+            if idleLoops > 120000 { return false }
+            continue
+        }
+        idleLoops = 0
+        let written = data.withUnsafeBytes { ptr -> Int in
+            guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+            return stream.write(base.advanced(by: offset), maxLength: min(32768, total - offset))
+        }
+        if written > 0 {
+            offset += written
+        } else if written == 0 {
+            Thread.sleep(forTimeInterval: 0.002)
+        } else {
+            return false
+        }
+    }
+    return true
+}
+
 func writeAll(
     _ stream: OutputStream,
     data: Data,
@@ -2098,10 +2142,12 @@ func writeAll(
     peerName: String = "",
     clearProgressOnSuccess: Bool = false
 ) -> Bool {
+    if !trackProgress {
+        return writeControlBytes(stream, data: data)
+    }
     var offset = 0
     let total = data.count
     var idleLoops = 0
-    var lastLoggedPct = -10
     let startTime = Date()
     var lastEmit = Date.distantPast
     var lastLockTouch = Date()
@@ -2127,11 +2173,6 @@ func writeAll(
         if written > 0 {
             offset += written
             let pct = (offset * 100) / max(1, total)
-            if trackProgress && (pct >= lastLoggedPct + 10 || offset == total) {
-                lastLoggedPct = pct
-                print("[BLE-Send] Progress: \(pct)% (\(offset / 1024) KB / \(total / 1024) KB)")
-                fflush(stdout)
-            }
             if trackProgress {
                 let now = Date()
                 if now.timeIntervalSince(lastLockTouch) >= 15.0 {
@@ -3962,21 +4003,21 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                     let rawParts = replyLine.dropFirst(5).split(separator: "\t").map(String.init)
                     let parts = rawParts.filter { !$0.isEmpty }
                     var androidPubB64 = ""
-                    var androidTlsFingerprint = ""
+                    var androidSha256Pin = ""
                     if parts.count >= 3 && (parts[0] == "2" || parts[0] == "1") {
                         androidPubB64 = parts[1]
-                        androidTlsFingerprint = parts[2]
+                        androidSha256Pin = parts[2]
                     } else if parts.count == 2 && (parts[0] == "2" || parts[0] == "1") {
                         androidPubB64 = parts[1]
                     } else if parts.count >= 2 {
                         androidPubB64 = parts[0]
-                        androidTlsFingerprint = parts[1]
+                        androidSha256Pin = parts[1]
                     } else if parts.count == 1 {
                         androidPubB64 = parts[0]
                     }
-                    let macTlsFingerprint = getLocalMacTlsCertFingerprint()
-                    guard isValidSha256Fingerprint(androidTlsFingerprint),
-                          isValidSha256Fingerprint(macTlsFingerprint),
+                    let macSha256Pin = computeLocalMacSha256Pin()
+                    guard isValidSha256Fingerprint(androidSha256Pin),
+                          isValidSha256Fingerprint(macSha256Pin),
                           !androidPubB64.isEmpty,
                           let androidPubDer = Data(base64Encoded: androidPubB64),
                           let androidPub = try? P256.KeyAgreement.PublicKey(derRepresentation: androidPubDer) else {
@@ -3985,7 +4026,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         _ = writeAll(out, data: Data("NO\n".utf8))
                         return
                     }
-                    let normalizedPin = normalizeSha256Fingerprint(androidTlsFingerprint)
+                    let normalizedPin = normalizeSha256Fingerprint(androidSha256Pin)
                     let macPriv = P256.KeyAgreement.PrivateKey()
                     guard let sharedSecret = try? macPriv.sharedSecretFromKeyAgreement(with: androidPub) else {
                         _ = writeAll(out, data: Data("NO\n".utf8))
@@ -3995,8 +4036,8 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                     let sessionToken = deriveSessionToken(sharedSecret: sharedSecret)
                     registerP2pSessionToken(sessionToken)
                     let macPubB64 = macPriv.publicKey.derRepresentation.base64EncodedString()
-                    let reply = "OK\t\(macPubB64)\t\(macTlsFingerprint)\n"
-                    guard writeAll(out, data: Data(reply.utf8)),
+                    let reply = "OK\t\(macPubB64)\t\(macSha256Pin)\n"
+                    guard writeControlBytes(out, data: Data(reply.utf8)),
                           let joinLine = readBleStreamLine(inp), joinLine.hasPrefix("JOIN\t") else {
                         revokeP2pSessionToken(sessionToken)
                         _ = writeAll(out, data: Data("NO\n".utf8))
@@ -4263,10 +4304,10 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         return
                     }
                     let androidPubB64 = w2p2Req.pubB64
-                    let androidTlsFingerprint = w2p2Req.tlsFingerprint
-                    let macTlsFingerprint = getLocalMacTlsCertFingerprint()
-                    guard isValidSha256Fingerprint(androidTlsFingerprint),
-                          isValidSha256Fingerprint(macTlsFingerprint),
+                    let androidSha256Pin = w2p2Req.tlsFingerprint
+                    let macSha256Pin = computeLocalMacSha256Pin()
+                    guard isValidSha256Fingerprint(androidSha256Pin),
+                          isValidSha256Fingerprint(macSha256Pin),
                           let w2p2SessionId = w2p2Req.sessionId, w2p2SessionId.count == W2P2_SESSION_ID_BYTES,
                           !androidPubB64.isEmpty,
                           let androidPubDer = Data(base64Encoded: androidPubB64),
@@ -4276,7 +4317,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         _ = writeAll(out, data: Data("ERR\n".utf8))
                         return
                     }
-                    let normalizedPin = normalizeSha256Fingerprint(androidTlsFingerprint)
+                    let normalizedPin = normalizeSha256Fingerprint(androidSha256Pin)
 
                     let macPriv = P256.KeyAgreement.PrivateKey()
                     guard let sharedSecret = try? macPriv.sharedSecretFromKeyAgreement(with: androidPub),
@@ -4285,8 +4326,8 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                             sessionId: w2p2SessionId,
                             initiatorPubDer: androidPubDer,
                             responderPubDer: macPriv.publicKey.derRepresentation,
-                            initiatorFingerprint: androidTlsFingerprint,
-                            responderFingerprint: macTlsFingerprint
+                            initiatorFingerprint: androidSha256Pin,
+                            responderFingerprint: macSha256Pin
                           ) else {
                         _ = writeAll(out, data: Data("ERR\n".utf8))
                         return
@@ -4296,8 +4337,8 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                     let w2p2VerificationCode = material.verificationCode
                     registerP2pSessionToken(sessionToken)
                     let macPubB64 = macPriv.publicKey.derRepresentation.base64EncodedString()
-                    let reply = "OK\t\(macPubB64)\t\(macTlsFingerprint)\n"
-                    guard writeAll(out, data: Data(reply.utf8)) else {
+                    let reply = "OK\t\(macPubB64)\t\(macSha256Pin)\n"
+                    guard writeControlBytes(out, data: Data(reply.utf8)) else {
                         revokeP2pSessionToken(sessionToken)
                         return
                     }
@@ -5074,8 +5115,8 @@ final class BleGlideDropSender: NSObject, CBCentralManagerDelegate, CBPeripheral
                 print("[BLE-Send] Negotiating 5GHz Wi-Fi Direct P2P over BLE L2CAP (ECDH P-256)...")
                 fflush(stdout)
 
-                let macCertFingerprint = getLocalMacTlsCertFingerprint()
-                guard isValidSha256Fingerprint(macCertFingerprint) else {
+                let macSha256Pin = computeLocalMacSha256Pin()
+                guard isValidSha256Fingerprint(macSha256Pin) else {
                     failL2capSession(message: "[BLE-Send] Local TLS certificate fingerprint unavailable — refusing unpinned P2P handshake")
                 }
 
@@ -5086,11 +5127,11 @@ final class BleGlideDropSender: NSObject, CBCentralManagerDelegate, CBPeripheral
                 var w2p2ReplyLine: String? = nil
                 var w2p2VerificationCode: String? = nil
                 let w2p2SessionId = randomW2p2SessionId()
-                let w2p2Request = "W2P2\t\(W2P2_PROTOCOL_VERSION)\t\(macPubB64)\t\(macCertFingerprint)\t\(w2p2HexString(w2p2SessionId))\n"
+                let w2p2Request = "W2P2\t\(W2P2_PROTOCOL_VERSION)\t\(macPubB64)\t\(macSha256Pin)\t\(w2p2HexString(w2p2SessionId))\n"
 
                 // Strict v3 ECDH P-256 negotiation with mandatory peer TLS pinning (no unpinned WP2P downgrade)
                 try? FileManager.default.removeItem(at: STATE_DIR.appendingPathComponent("pinned_peer_tls_fingerprint.txt"))
-                let w2p2WriteOk = writeAll(out, data: Data(w2p2Request.utf8))
+                let w2p2WriteOk = writeControlBytes(out, data: Data(w2p2Request.utf8))
                 if w2p2WriteOk {
                     // Android may answer `PENDING\t<retryAfterMs>` while its group is still starting.
                     // Wait the advertised time (bounded), resend the same W2P2 request, and read again.
@@ -5108,7 +5149,7 @@ final class BleGlideDropSender: NSObject, CBCentralManagerDelegate, CBPeripheral
                         print("[BLE-Send] Peer Wi-Fi Direct group still starting; retrying W2P2 in \(retryAfterMs) ms (\(pendingRetries)/4)")
                         fflush(stdout)
                         Thread.sleep(forTimeInterval: Double(retryAfterMs) / 1000.0)
-                        if !writeAll(out, data: Data(w2p2Request.utf8)) {
+                        if !writeControlBytes(out, data: Data(w2p2Request.utf8)) {
                             w2p2ReplyLine = nil
                             break
                         }
@@ -5127,7 +5168,7 @@ final class BleGlideDropSender: NSObject, CBCentralManagerDelegate, CBPeripheral
                                 sessionId: w2p2SessionId,
                                 initiatorPubDer: macPriv.publicKey.derRepresentation,
                                 responderPubDer: androidPubDer,
-                                initiatorFingerprint: macCertFingerprint,
+                                initiatorFingerprint: macSha256Pin,
                                 responderFingerprint: parts[1]
                            ) {
                             let sessionKey = material.sessionKey

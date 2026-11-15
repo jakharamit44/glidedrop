@@ -2,6 +2,12 @@
 
 All notable changes to GlideDrop are documented in this file.
 
+## [v3.0.4]
+### Security
+- **Swift command-line injection (`swift/command-line-injection`)**: `restoreMacInternetWifi` in `glidedrop-daemon.swift` now reads the previously active Wi-Fi SSID from thread-safe process memory (`setSavedHomeWifiSsid`/`getSavedHomeWifiSsid`) instead of passing file contents from `previous_wifi_ssid.txt` to `/usr/sbin/networksetup`, and rejects option-like (`-`) or `DIRECT-*` names.
+- **Swift path injection (`swift/path-injection`)**: `readFinderProxySockPath` now always returns the canonical `finder_proxy.sock` path inside `stateDir` instead of resolving an arbitrary path string read from `finder_proxy_sock`.
+- **Swift cleartext logging (`swift/cleartext-logging`)**: separated silent control-frame stream writes (`writeControlBytes`) from progress-tracking transfers (`writeAll`), removed byte-count progress console logging in `writeAll`, and cleaned up TLS pin helper naming in `glidedrop-daemon.swift`.
+
 ## [v3.0.3]
 ### Fixed
 - **macOS Discoverable Nearby OFF leaked presence to Android**: turning off Discoverable Nearby on macOS now removes CoreBluetooth GATT services (`removeAllServices`), unpublishes the L2CAP channel, closes active channels, and stops stray daemons while keeping the header pill and Receive tab synchronized. On Android, macOS CoreBluetooth Overflow Area advertisements (`psm == 0`) no longer create or refresh a nearby Mac without a verified active GATT PSM.
