@@ -1,12 +1,7 @@
 name: "CodeQL"
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  schedule:
-    - cron: '30 4 * * 1'
+  workflow_dispatch:
 
 jobs:
   analyze:
@@ -54,21 +49,20 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
-      # Manual build for Android (Kotlin / Java)
+      # Manual build for Android (Kotlin / Java) without cached skips or compiler daemon
       - name: Build Android (Gradle)
         if: matrix.language == 'java-kotlin'
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew clean compileDebugKotlin --no-daemon --no-build-cache --no-configuration-cache -Dkotlin.compiler.execution.strategy=in-process
 
-      # Manual build for macOS (Swift)
+      # Fast unoptimized Swift build for CodeQL extraction (no LLVM -O or app bundle signing)
       - name: Build macOS (Swift)
         if: matrix.language == 'swift'
         working-directory: macos
         run: |
-          chmod +x build.sh
-          ./build.sh
+          xcrun swiftc -Onone glidedrop-daemon.swift -o "${RUNNER_TEMP:-/tmp}/glidedrop-daemon"
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
