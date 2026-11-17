@@ -1703,11 +1703,7 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
             except Exception:
                 pass
         try:
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
-        except Exception:
-            pass
-        try:
-            conn.shutdown(socket.SHUT_RDWR)
+            conn.shutdown(socket.SHUT_WR)
         except Exception:
             pass
         try:

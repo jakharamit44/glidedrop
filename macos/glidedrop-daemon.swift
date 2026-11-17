@@ -2229,6 +2229,12 @@ func finishWp2pJoin() {
     wp2pJoinActive = false
 }
 
+func isWp2pJoinActive() -> Bool {
+    wp2pJoinLock.lock()
+    defer { wp2pJoinLock.unlock() }
+    return wp2pJoinActive
+}
+
 struct ParsedWp2pJoinPayload: Equatable {
     let ssid: String
     let pass: String
@@ -3845,13 +3851,16 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             try? FileManager.default.removeItem(at: txProgress)
             return false
         }()
-        if hasActiveTxInProgressLock(now: now) ||
+        let hasPendingAsk = FileManager.default.fileExists(atPath: STATE_DIR.appendingPathComponent("pending_ask.json").path)
+        if isWp2pJoinActive() ||
+           hasPendingAsk ||
+           hasActiveTxInProgressLock(now: now) ||
            hasActiveTxProgress ||
            hasActiveTcpReceiverConnection() {
             if cm.state == .poweredOn && cm.isScanning {
                 cm.stopScan()
             }
-            if isPingingPeer {
+            if !isWp2pJoinActive() && !hasPendingAsk && isPingingPeer {
                 isPingingPeer = false
                 pingChannel = nil
                 activePingPeripheral = nil
@@ -3999,41 +4008,51 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                 let targetPeerName = loadActivePeersFromDisk(maxAge: 30.0).first(where: { $0.id == targetPeerId })?.name ?? "Android Peer"
 
                 if replyLine.hasPrefix("W2P2\t") {
-                    DispatchQueue.main.async { self?.pingStartedAt = Date().timeIntervalSince1970 + 120.0 }
-                    let rawParts = replyLine.dropFirst(5).split(separator: "\t").map(String.init)
-                    let parts = rawParts.filter { !$0.isEmpty }
-                    var androidPubB64 = ""
-                    var androidSha256Pin = ""
-                    if parts.count >= 3 && (parts[0] == "2" || parts[0] == "1") {
-                        androidPubB64 = parts[1]
-                        androidSha256Pin = parts[2]
-                    } else if parts.count == 2 && (parts[0] == "2" || parts[0] == "1") {
-                        androidPubB64 = parts[1]
-                    } else if parts.count >= 2 {
-                        androidPubB64 = parts[0]
-                        androidSha256Pin = parts[1]
-                    } else if parts.count == 1 {
-                        androidPubB64 = parts[0]
+                    DispatchQueue.main.async {
+                        self?.pingStartedAt = Date().timeIntervalSince1970 + 300.0
+                        if self?.cm.state == .poweredOn && self?.cm.isScanning == true {
+                            self?.cm.stopScan()
+                        }
                     }
+                    let reqStr = String(replyLine.dropFirst(5))
+                    let w2p2Req = parseW2p2Request(reqStr)
+                    if w2p2Req.version < W2P2_PROTOCOL_VERSION {
+                        print("[BLE-Daemon] Rejected W2P2 v\(w2p2Req.version) heartbeat request: peer must update GlideDrop (protocol v\(W2P2_PROTOCOL_VERSION) required)")
+                        fflush(stdout)
+                        _ = writeAll(out, data: Data("ERR\tUPDATE\t\(W2P2_PROTOCOL_VERSION)\n".utf8))
+                        return
+                    }
+                    let androidPubB64 = w2p2Req.pubB64
+                    let androidSha256Pin = w2p2Req.tlsFingerprint
                     let macSha256Pin = computeLocalMacSha256Pin()
                     guard isValidSha256Fingerprint(androidSha256Pin),
                           isValidSha256Fingerprint(macSha256Pin),
+                          let w2p2SessionId = w2p2Req.sessionId, w2p2SessionId.count == W2P2_SESSION_ID_BYTES,
                           !androidPubB64.isEmpty,
                           let androidPubDer = Data(base64Encoded: androidPubB64),
                           let androidPub = try? P256.KeyAgreement.PublicKey(derRepresentation: androidPubDer) else {
-                        print("[BLE-Daemon] Rejected W2P2 heartbeat handshake: missing/invalid peer public key or TLS fingerprint")
+                        print("[BLE-Daemon] Rejected W2P2 heartbeat handshake: missing/invalid peer public key, session id or TLS fingerprint")
                         fflush(stdout)
                         _ = writeAll(out, data: Data("NO\n".utf8))
                         return
                     }
                     let normalizedPin = normalizeSha256Fingerprint(androidSha256Pin)
                     let macPriv = P256.KeyAgreement.PrivateKey()
-                    guard let sharedSecret = try? macPriv.sharedSecretFromKeyAgreement(with: androidPub) else {
+                    guard let sharedSecret = try? macPriv.sharedSecretFromKeyAgreement(with: androidPub),
+                          let material = deriveW2p2SessionMaterial(
+                            sharedSecret: sharedSecret,
+                            sessionId: w2p2SessionId,
+                            initiatorPubDer: androidPubDer,
+                            responderPubDer: macPriv.publicKey.derRepresentation,
+                            initiatorFingerprint: androidSha256Pin,
+                            responderFingerprint: macSha256Pin
+                          ) else {
                         _ = writeAll(out, data: Data("NO\n".utf8))
                         return
                     }
-                    let sessionKey = deriveSessionKey(sharedSecret: sharedSecret)
-                    let sessionToken = deriveSessionToken(sharedSecret: sharedSecret)
+                    let sessionKey = material.sessionKey
+                    let sessionToken = material.token
+                    let w2p2VerificationCode = material.verificationCode
                     registerP2pSessionToken(sessionToken)
                     let macPubB64 = macPriv.publicKey.derRepresentation.base64EncodedString()
                     let reply = "OK\t\(macPubB64)\t\(macSha256Pin)\n"
@@ -4068,7 +4087,8 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         sessionToken: sessionToken,
                         peerTlsFingerprint: normalizedPin,
                         inp: inp,
-                        isRemoteDisconnected: { [weak self] in self?.isPingPeerDisconnected() ?? false }
+                        isRemoteDisconnected: { [weak self] in self?.isPingPeerDisconnected() ?? false },
+                        verificationCode: w2p2VerificationCode
                     )
                     return
                 }

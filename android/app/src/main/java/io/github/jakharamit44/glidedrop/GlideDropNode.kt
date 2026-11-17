@@ -4116,7 +4116,13 @@ class GlideDropNode(private val context: Context) {
                     clearLastMacSessionState()
                 }
 
-                // 2. Queue transfer for Mac's 1.5s BLE L2CAP heartbeat (works even when Android BLE scan is blocked by OS Location toggle)
+                // 2. Pre-warm 5GHz Wi-Fi Direct group before queueing so credentials are ready when Mac PING arrives,
+                // then queue transfer for Mac's 1.8s BLE L2CAP heartbeat (works even when Android BLE scan is blocked by OS Location toggle).
+                if (totalRawBytes >= 65_536L && entries.isNotEmpty() && wifiDirectCreds.isEmpty()) {
+                    reportConnecting(label, totalRawBytes, fileCount, isSending = true, phase = "Starting 5GHz Wi-Fi Direct…", peerName = targetPeerLabel)
+                    ensureWifiDirectCreds()
+                    if (transferCancelled) return@withLock false
+                }
                 val initialConnectPhase = if (totalRawBytes >= 65_536L && entries.isNotEmpty()) {
                     "Preparing 5GHz Wi-Fi Direct…"
                 } else {
@@ -4154,20 +4160,27 @@ class GlideDropNode(private val context: Context) {
                     return@withLock false
                 }
                 if (deferred.isCompleted || tx.isClaimed) {
-                    return@withLock deferred.await()
+                    val heartbeatOk = deferred.await()
+                    if (heartbeatOk) {
+                        return@withLock true
+                    }
+                    if (transferCancelled) {
+                        return@withLock false
+                    }
+                    log("Heartbeat piggyback did not complete; retrying via Direct BLE L2CAP\u2026")
                 }
 
-                // 4. Fallback: if Mac heartbeat did not arrive within initial window and we have a scanned BLE peripheral, try direct L2CAP
+                // 4. Fallback: if Mac heartbeat did not arrive or did not complete and we have a scanned BLE peripheral, try direct L2CAP
                 val dev = bleMacDevice
                 var psm = bleMacPsm
-                if (dev != null && psm <= 0 && !tx.isClaimed) {
+                if (dev != null && psm <= 0) {
                     val resolved = resolveMacGattPsm(dev)
                     if (resolved > 0) {
                         bleMacPsm = resolved
                         psm = resolved
                     }
                 }
-                if (dev != null && tx.tryClaim()) {
+                if (dev != null && (tx.tryClaim() || deferred.isCompleted)) {
                     if (pendingMacTx === tx) {
                         pendingMacTx = null
                     }

@@ -1368,6 +1368,26 @@ struct GlideDropDaemonTests {
             check(okCtrl && writtenData == Data("OK\tPIN\n".utf8), "writeControlBytes must write exact bytes to an open OutputStream")
             print("[PASS] Security hardening regressions (canonical socket path, in-memory SSID, writeControlBytes)")
         }
+
+        // 14. Heartbeat W2P2 v3 handshake & wp2pJoinActive lock tracking
+        do {
+            check(!isWp2pJoinActive(), "isWp2pJoinActive must default to false")
+            check(beginWp2pJoin(), "beginWp2pJoin must succeed when idle")
+            check(isWp2pJoinActive(), "isWp2pJoinActive must be true while join is active")
+            check(!beginWp2pJoin(), "concurrent beginWp2pJoin must fail")
+            finishWp2pJoin()
+            check(!isWp2pJoinActive(), "isWp2pJoinActive must reset to false after finishWp2pJoin")
+
+            let daemonSrc = (try? String(contentsOfFile: #filePath.replacingOccurrences(of: "test_glidedrop_daemon.swift", with: "glidedrop-daemon.swift"), encoding: .utf8)) ?? ""
+            let hbSection = daemonSrc.components(separatedBy: "if replyLine.hasPrefix(\"W2P2\\t\") {").dropFirst().first?
+                .components(separatedBy: "if replyLine.hasPrefix(\"WP2P\") {").first ?? ""
+            check(!hbSection.isEmpty, "Could not locate heartbeat W2P2 section")
+            check(hbSection.contains("parseW2p2Request") && hbSection.contains("deriveW2p2SessionMaterial"),
+                  "Heartbeat W2P2 handler must use W2P2 v3 parseW2p2Request and deriveW2p2SessionMaterial")
+            check(!hbSection.contains("parts[0] == \"2\""),
+                  "Heartbeat W2P2 handler must not contain legacy v1/v2 parsing")
+            print("[PASS] Heartbeat W2P2 v3 handshake & join-active guards")
+        }
         if failures > 0 {
             fputs("[SUMMARY] \(failures) Swift regression check(s) FAILED\n", stderr)
             exit(1)
