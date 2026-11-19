@@ -3353,6 +3353,67 @@ private fun SettingsScreenTab(
                 }
             }
         }
+
+        // App Version Card
+        item {
+            val context = LocalContext.current
+            val appVersion = remember(context) {
+                runCatching {
+                    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        context.packageManager.getPackageInfo(
+                            context.packageName,
+                            PackageManager.PackageInfoFlags.of(0)
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        context.packageManager.getPackageInfo(context.packageName, 0)
+                    }
+                    info.versionName?.takeIf { it.isNotBlank() } ?: "3.0.6"
+                }.getOrDefault("3.0.6")
+            }
+            Surface(
+                color = c.surfaceRaised,
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, c.borderSubtle),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            text = "App Version",
+                            color = c.textPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            text = "GlideDrop for Android",
+                            color = c.textSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Surface(
+                        color = c.surfaceSunken,
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, c.borderSubtle)
+                    ) {
+                        Text(
+                            text = "v$appVersion",
+                            color = c.textPrimary,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 12.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

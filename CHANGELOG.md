@@ -2,6 +2,10 @@
 
 All notable changes to GlideDrop are documented in this file.
 
+## [v3.0.6]
+### Added
+- **In-app Version Display (Android & macOS)**: Added an **App Version** card in the **Settings** tab on both Android (`PackageManager` `versionName`) and macOS (`CFBundleShortVersionString`) so users can check their installed version directly inside the app.
+
 ## [v3.0.5]
 ### Security
 - **Android `ACTION_VIEW` URI validation**: Added `UriSecurity` to enforce `http`/`https` with a non-empty host before launching peer-supplied URLs in `GlideDropService` and `MainActivity`.

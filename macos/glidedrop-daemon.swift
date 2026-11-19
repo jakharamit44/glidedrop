@@ -8375,6 +8375,37 @@ struct MacGlideDropMainView: View {
                     .fill(p.bgSurface)
                     .overlay(RoundedRectangle(cornerRadius: 20).stroke(p.border, lineWidth: 1))
             )
+
+            // App Version Card
+            let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 } ?? "3.0.6"
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("App Version")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(p.textPrimary)
+                    Text("GlideDrop for macOS")
+                        .font(.system(size: 12))
+                        .foregroundColor(p.textSecondary)
+                }
+                Spacer()
+                Text("v\(appVersion)")
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundColor(p.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(p.bgSubtle)
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(p.border, lineWidth: 1))
+                    )
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 20)
+                    .fill(p.bgSurface)
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(p.border, lineWidth: 1))
+            )
         }
     }
 
