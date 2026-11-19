@@ -33,6 +33,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -45,6 +46,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -91,7 +93,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -242,7 +246,7 @@ private fun Modifier.pressableScale(
         }
     base.clickable(
         interactionSource = interactionSource,
-        indication = null,
+        indication = LocalIndication.current,
         enabled = enabled,
         role = role,
         onClick = onClick
@@ -259,34 +263,23 @@ private fun timeOfDayGreeting(): String {
     }
 }
 
-private fun readInternalStorage(): StorageBreakdown {
-    return try {
-        val stat = StatFs(Environment.getDataDirectory().path)
-        val total = stat.totalBytes.coerceAtLeast(1L)
-        val free = stat.availableBytes.coerceIn(0L, total)
-        StorageBreakdown(
-            totalBytes = total,
-            freeBytes = free,
-            usedBytes = (total - free).coerceAtLeast(0L)
-        )
-    } catch (_: Throwable) {
-        StorageBreakdown(totalBytes = 128L * 1024 * 1024 * 1024, freeBytes = 64L * 1024 * 1024 * 1024, usedBytes = 64L * 1024 * 1024 * 1024)
-    }
-}
-
 class MainActivity : ComponentActivity() {
 
     private lateinit var node: GlideDropNode
+    private lateinit var viewModel: GlideDropViewModel
     private val sharedUris = MutableStateFlow<List<Uri>>(emptyList())
     private val sharedText = MutableStateFlow<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         node = GlideDropService.getNode(applicationContext)
+        viewModel = ViewModelProvider(this)[GlideDropViewModel::class.java]
         runCatching {
             startForegroundService(Intent(this, GlideDropService::class.java))
         }
-        captureShareIntent(intent)
+        if (savedInstanceState == null) {
+            captureShareIntent(intent)
+        }
 
         enableEdgeToEdge()
         setContent {
@@ -311,6 +304,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     GlideDropScreen(
                         node = node,
+                        viewModel = viewModel,
                         isDark = isDark,
                         themeMode = themeMode,
                         pendingSharedUris = sharedUris.collectAsState().value,
@@ -320,8 +314,17 @@ class MainActivity : ComponentActivity() {
                             sharedText.value = null
                         },
                         onOpenUrl = { url ->
-                            runCatching {
-                                startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
+                            val safeUri = UriSecurity.parseSafeWebUri(url)
+                            if (safeUri != null) {
+                                runCatching {
+                                    startActivity(Intent(Intent.ACTION_VIEW, safeUri))
+                                }
+                            } else {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    getString(R.string.invalid_url_toast),
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
                         },
                         onOpenDownloads = {
@@ -353,6 +356,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         captureShareIntent(intent)
     }
 
@@ -367,11 +371,13 @@ class MainActivity : ComponentActivity() {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM)
                 }
                 if (stream != null) {
+                    sharedText.value = null
                     sharedUris.value = listOf(stream)
                     return
                 }
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
                 if (!text.isNullOrBlank()) {
+                    sharedUris.value = emptyList()
                     sharedText.value = text.trim()
                 }
             }
@@ -382,7 +388,10 @@ class MainActivity : ComponentActivity() {
                     @Suppress("DEPRECATION")
                     intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
                 }
-                if (!streams.isNullOrEmpty()) sharedUris.value = streams
+                if (!streams.isNullOrEmpty()) {
+                    sharedText.value = null
+                    sharedUris.value = streams
+                }
             }
         }
     }
@@ -419,6 +428,7 @@ private fun glideTextFieldColors(): TextFieldColors {
 @Composable
 fun GlideDropScreen(
     node: GlideDropNode,
+    viewModel: GlideDropViewModel,
     isDark: Boolean,
     themeMode: String,
     pendingSharedUris: List<Uri>,
@@ -450,82 +460,35 @@ fun GlideDropScreen(
     var historyQuery by rememberSaveable { mutableStateOf("") }
     var showLogs by rememberSaveable { mutableStateOf(false) }
 
-    val stagedItems = remember { mutableStateListOf<StagedFileItem>() }
+    val stagedItems by viewModel.stagedItems.collectAsState()
     var selectedPeerId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    var showTextModal by remember { mutableStateOf(false) }
-    var textSnippetDraft by remember { mutableStateOf("") }
-    var showRenameDialog by remember { mutableStateOf(false) }
-    var renameText by remember { mutableStateOf(deviceName) }
+    val showTextModal by viewModel.showTextModal.collectAsState()
+    val textSnippetDraft by viewModel.textSnippetDraft.collectAsState()
+    val showRenameDialog by viewModel.showRenameDialog.collectAsState()
+    val renameText by viewModel.renameText.collectAsState()
+    val storageState by viewModel.storageState.collectAsState()
 
-    var storageInfo by remember { mutableStateOf(StorageBreakdown(0L, 0L, 0L)) }
+    LaunchedEffect(deviceName) {
+        viewModel.syncDeviceNameIfClosed(deviceName)
+    }
     LaunchedEffect(receivedItems.size, activeTab) {
-        withContext(Dispatchers.IO) {
-            storageInfo = readInternalStorage()
-        }
+        viewModel.refreshStorage()
     }
 
     val appScope = rememberCoroutineScope()
 
     fun stageUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
-        val toResolve = ArrayList<Uri>(uris.size)
-        for (uri in uris) {
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            }
-            val key = uri.toString()
-            if (stagedItems.none { it.id == key }) {
-                toResolve.add(uri)
-            }
-        }
         activeTab = 0
-        if (toResolve.isEmpty()) return
-        appScope.launch {
-            val resolved = withContext(Dispatchers.IO) {
-                toResolve.map { uri ->
-                    val (name, size) = node.inspectUriMeta(uri)
-                    StagedFileItem(
-                        id = uri.toString(),
-                        uri = uri,
-                        name = name,
-                        sizeBytes = size,
-                        category = categoryForFileName(name)
-                    )
-                }
-            }
-            var added = 0
-            for (item in resolved) {
-                if (stagedItems.none { it.id == item.id }) {
-                    stagedItems.add(item)
-                    added++
-                }
-            }
-            if (added > 0) {
-                Toast.makeText(context, "${stagedItems.size} file(s) staged — tap Send when ready", Toast.LENGTH_SHORT).show()
-            }
+        viewModel.stageUris(context, node, uris) { _, totalCount ->
+            Toast.makeText(context, "$totalCount file(s) staged — tap Send when ready", Toast.LENGTH_SHORT).show()
         }
     }
 
     fun stageTextOrUrl(raw: String) {
-        val trimmed = raw.trim()
-        if (trimmed.isEmpty()) return
-        val isLink = trimmed.startsWith("http://") || trimmed.startsWith("https://")
-        val key = "text:$trimmed"
-        if (stagedItems.none { it.id == key }) {
-            stagedItems.add(
-                StagedFileItem(
-                    id = key,
-                    textOrUrl = trimmed,
-                    name = if (isLink) trimmed else "Text note (${trimmed.take(28)})",
-                    sizeBytes = trimmed.toByteArray().size.toLong(),
-                    category = if (isLink) "Link" else "Doc"
-                )
-            )
-        }
+        if (raw.trim().isEmpty()) return
+        viewModel.stageTextOrUrl(raw)
         activeTab = 0
     }
 
@@ -566,12 +529,12 @@ fun GlideDropScreen(
             add(Manifest.permission.BLUETOOTH_ADVERTISE)
             add(Manifest.permission.BLUETOOTH_CONNECT)
             add(Manifest.permission.BLUETOOTH_SCAN)
-            add(Manifest.permission.ACCESS_FINE_LOCATION)
-            add(Manifest.permission.ACCESS_COARSE_LOCATION)
             if (Build.VERSION.SDK_INT >= 33) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
                 add(Manifest.permission.NEARBY_WIFI_DEVICES)
             } else {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+                add(Manifest.permission.ACCESS_COARSE_LOCATION)
                 add(Manifest.permission.READ_EXTERNAL_STORAGE)
             }
             if (Build.VERSION.SDK_INT >= 37) {
@@ -613,10 +576,10 @@ fun GlideDropScreen(
         if (urisToSend.isNotEmpty()) {
             node.sendUrisAsync(activePeer, urisToSend) { ok ->
                 if (ok) {
-                    stagedItems.removeAll { it.uri != null }
+                    viewModel.removeStagedUriItems()
                     if (textsToSend.isNotEmpty()) {
                         node.sendTextSnippetAsync(activePeer, textsToSend.joinToString("\n")) { textOk ->
-                            if (textOk) stagedItems.clear()
+                            if (textOk) viewModel.clearStagedItems()
                         }
                     } else {
                         Toast.makeText(context, "Sent ${urisToSend.size} file(s)", Toast.LENGTH_SHORT).show()
@@ -629,7 +592,7 @@ fun GlideDropScreen(
             val combined = textsToSend.joinToString("\n")
             node.sendTextSnippetAsync(activePeer, combined) { ok ->
                 if (ok) {
-                    stagedItems.clear()
+                    viewModel.clearStagedItems()
                     Toast.makeText(context, "Sent shared link / text", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(context, "Transfer did not complete — item kept in selection", Toast.LENGTH_LONG).show()
@@ -798,7 +761,7 @@ fun GlideDropScreen(
     // Add Link / Text Snippet Dialog (stages into selection queue)
     if (showTextModal) {
         AlertDialog(
-            onDismissRequest = { showTextModal = false },
+            onDismissRequest = { viewModel.dismissTextModal() },
             containerColor = c.surfaceOverlay,
             shape = RoundedCornerShape(20.dp),
             title = {
@@ -826,7 +789,7 @@ fun GlideDropScreen(
                             onClick = {
                                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                 val pasted = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                                if (pasted.isNotBlank()) textSnippetDraft = pasted
+                                if (pasted.isNotBlank()) viewModel.updateTextSnippetDraft(pasted)
                             }
                         ) {
                             Text("Paste", color = c.textAccent, fontWeight = FontWeight.SemiBold)
@@ -834,7 +797,7 @@ fun GlideDropScreen(
                     }
                     OutlinedTextField(
                         value = textSnippetDraft,
-                        onValueChange = { textSnippetDraft = it },
+                        onValueChange = { viewModel.updateTextSnippetDraft(it) },
                         placeholder = { Text("https://example.com or note…", color = c.textTertiary) },
                         colors = glideTextFieldColors(),
                         shape = RoundedCornerShape(12.dp),
@@ -849,8 +812,8 @@ fun GlideDropScreen(
                     enabled = textSnippetDraft.isNotBlank(),
                     onClick = {
                         stageTextOrUrl(textSnippetDraft)
-                        textSnippetDraft = ""
-                        showTextModal = false
+                        viewModel.updateTextSnippetDraft("")
+                        viewModel.dismissTextModal()
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = c.bgActionPrimary,
@@ -862,7 +825,7 @@ fun GlideDropScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showTextModal = false }) {
+                TextButton(onClick = { viewModel.dismissTextModal() }) {
                     Text("Cancel", color = c.textSecondary)
                 }
             }
@@ -872,7 +835,7 @@ fun GlideDropScreen(
     // Rename Device Modal
     if (showRenameDialog) {
         AlertDialog(
-            onDismissRequest = { showRenameDialog = false },
+            onDismissRequest = { viewModel.dismissRenameDialog() },
             containerColor = c.surfaceOverlay,
             shape = RoundedCornerShape(20.dp),
             title = {
@@ -881,7 +844,7 @@ fun GlideDropScreen(
             text = {
                 OutlinedTextField(
                     value = renameText,
-                    onValueChange = { renameText = it.take(28) },
+                    onValueChange = { viewModel.updateRenameText(it) },
                     singleLine = true,
                     label = { Text("Visible to nearby Macs") },
                     colors = glideTextFieldColors(),
@@ -894,7 +857,7 @@ fun GlideDropScreen(
                     enabled = renameText.trim().isNotEmpty(),
                     onClick = {
                         node.deviceName = renameText.trim()
-                        showRenameDialog = false
+                        viewModel.dismissRenameDialog()
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = c.bgActionPrimary,
@@ -908,12 +871,14 @@ fun GlideDropScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showRenameDialog = false }) {
+                TextButton(onClick = { viewModel.dismissRenameDialog() }) {
                     Text("Cancel", color = c.textSecondary)
                 }
             }
         )
     }
+
+    val scanningNearbyToast = stringResource(R.string.scanning_nearby_toast)
 
     Scaffold(
         containerColor = c.surfaceBase,
@@ -927,12 +892,11 @@ fun GlideDropScreen(
                     node.themeMode = if (isDark) "light" else "dark"
                 },
                 onRenameClick = {
-                    renameText = deviceName
-                    showRenameDialog = true
+                    viewModel.openRenameDialog(deviceName)
                 },
                 onRescanClick = {
                     node.refreshP2p()
-                    Toast.makeText(context, "Scanning nearby BLE + 5GHz P2P…", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, scanningNearbyToast, Toast.LENGTH_SHORT).show()
                 }
             )
         },
@@ -996,11 +960,11 @@ fun GlideDropScreen(
                     peers = peers,
                     selectedPeerId = selectedPeerId,
                     transferActive = transferProgress != null,
-                    storage = storageInfo,
+                    storageState = storageState,
                     recentSent = receivedItems.filter { it.isOutgoing }.take(3),
                     onSelectPeer = { selectedPeerId = it },
-                    onRemoveStaged = { item -> stagedItems.remove(item) },
-                    onClearStaged = { stagedItems.clear() },
+                    onRemoveStaged = { item -> viewModel.removeStagedItem(item) },
+                    onClearStaged = { viewModel.clearStagedItems() },
                     onSendStaged = { triggerSendStaged() },
                     onPickImages = { imagePicker.launch(arrayOf("image/*")) },
                     onPickVideos = { videoPicker.launch(arrayOf("video/*")) },
@@ -1019,7 +983,7 @@ fun GlideDropScreen(
                         )
                     },
                     onPickAudio = { audioPicker.launch(arrayOf("audio/*")) },
-                    onStageLinkOrText = { showTextModal = true },
+                    onStageLinkOrText = { viewModel.openTextModal() },
                     onPickAnyFiles = { anyFilePicker.launch(arrayOf("*/*")) },
                     onSwitchToReceive = { activeTab = 1 },
                     onSwitchToHistory = {
@@ -1030,7 +994,7 @@ fun GlideDropScreen(
                         if (sent.isUrl) {
                             onOpenUrl(sent.pathOrUrl)
                         } else if (canOpenOrShareHistoryItem(sent)) {
-                            openFileWithProvider(context, sent.pathOrUrl) {
+                            openFileWithProviderAsync(appScope, context, sent.pathOrUrl) {
                                 Toast.makeText(context, "Source file no longer accessible", Toast.LENGTH_SHORT).show()
                             }
                         } else {
@@ -1059,7 +1023,7 @@ fun GlideDropScreen(
                     },
                     onOpenHistoryItem = { item ->
                         if (item.isUrl) onOpenUrl(item.pathOrUrl)
-                        else openFileWithProvider(context, item.pathOrUrl, onOpenDownloads)
+                        else openFileWithProviderAsync(appScope, context, item.pathOrUrl, onOpenDownloads)
                     },
                     onViewAllReceived = {
                         historyFilter = 1
@@ -1076,7 +1040,7 @@ fun GlideDropScreen(
                         if (item.isUrl) {
                             onOpenUrl(item.pathOrUrl)
                         } else {
-                            openFileWithProvider(context, item.pathOrUrl) {
+                            openFileWithProviderAsync(appScope, context, item.pathOrUrl) {
                                 if (item.isOutgoing) {
                                     Toast.makeText(context, "Source file no longer accessible", Toast.LENGTH_SHORT).show()
                                 } else {
@@ -1085,7 +1049,7 @@ fun GlideDropScreen(
                             }
                         }
                     },
-                    onShareItem = { item -> shareFileOrUrl(context, item) },
+                    onShareItem = { item -> shareFileOrUrlAsync(appScope, context, item) },
                     onCopyText = { txt ->
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                         cm?.setPrimaryClip(ClipData.newPlainText("GlideDrop", txt))
@@ -1125,8 +1089,7 @@ fun GlideDropScreen(
                     onSelectAutoAccept = { node.autoAccept = it },
                     onToggleShareCellularInternet = { node.shareCellularInternet = it },
                     onRenameDevice = {
-                        renameText = deviceName
-                        showRenameDialog = true
+                        viewModel.openRenameDialog(deviceName)
                     },
                     onOpenDownloads = onOpenDownloads,
                     onResetTrustedDevices = {
@@ -1660,7 +1623,7 @@ private fun SendHomeTab(
     peers: List<GlideDropPeer>,
     selectedPeerId: String?,
     transferActive: Boolean,
-    storage: StorageBreakdown,
+    storageState: StorageState,
     recentSent: List<ReceivedItem>,
     onSelectPeer: (String) -> Unit,
     onRemoveStaged: (StagedFileItem) -> Unit,
@@ -1715,19 +1678,24 @@ private fun SendHomeTab(
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Categories",
+                            text = stringResource(R.string.categories_title),
                             color = c.textPrimary,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp
+                            fontSize = 16.sp,
+                            maxLines = 1
                         )
                         Text(
-                            text = "Select files to review before sending",
+                            text = stringResource(R.string.categories_subtitle),
                             color = c.textTertiary,
-                            fontSize = 12.sp
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.weight(1f)
                         )
                     }
 
@@ -1790,7 +1758,7 @@ private fun SendHomeTab(
 
         // 3. Storage Ring Card (Mockup 1 & Mockup 2 Storage Card)
         item {
-            StorageOverviewCard(storage = storage)
+            StorageOverviewCard(storageState = storageState)
         }
 
         // 4. Primary Send / Receive Action Buttons (Mockup 2 Bottom Action Pair)
@@ -2261,8 +2229,41 @@ private fun CategoryCircleItem(
 }
 
 @Composable
-private fun StorageOverviewCard(storage: StorageBreakdown) {
+private fun StorageOverviewCard(storageState: StorageState) {
     val c = LocalDsColors.current
+    val storage = when (storageState) {
+        is StorageState.Available -> storageState.breakdown
+        StorageState.Loading -> return
+        StorageState.Unavailable -> {
+            Surface(
+                color = c.surfaceRaised,
+                shape = RoundedCornerShape(20.dp),
+                border = BorderStroke(1.dp, c.borderSubtle),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Internal Storage",
+                        color = c.textPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                    Text(
+                        text = stringResource(R.string.storage_unavailable),
+                        color = c.textTertiary,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+            return
+        }
+    }
     val usedFraction = (storage.usedBytes.toFloat() / storage.totalBytes.coerceAtLeast(1L).toFloat()).coerceIn(0.04f, 0.96f)
     val freeGb = storage.freeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
     val totalGb = storage.totalBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
@@ -2512,7 +2513,11 @@ private fun ReceiveRadarTab(
                                 modifier = Modifier
                                     .align(Alignment.TopEnd)
                                     .padding(end = 26.dp, top = 18.dp)
-                                    .pressableScale { onStartSendToPeer(firstPeer) }
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                    .pressableScale(
+                                        role = Role.Button,
+                                        contentDesc = "Send files to $cleanTitle"
+                                    ) { onStartSendToPeer(firstPeer) }
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -3457,23 +3462,32 @@ private fun RadioReadinessCard(
                 modifier = Modifier.weight(1f)
             )
             Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = when {
-                    !permsGranted -> "Grant"
-                    !btEnabled -> "Turn On"
-                    else -> "Enable"
-                },
-                color = c.textAccent,
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
-                modifier = Modifier.clickable {
-                    when {
-                        !permsGranted -> onGrantPerms()
-                        !btEnabled -> onEnableBluetooth()
-                        else -> onEnableWifi()
+            val readinessActionLabel = when {
+                !permsGranted -> "Grant"
+                !btEnabled -> "Turn On"
+                else -> "Enable"
+            }
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(role = Role.Button) {
+                        when {
+                            !permsGranted -> onGrantPerms()
+                            !btEnabled -> onEnableBluetooth()
+                            else -> onEnableWifi()
+                        }
                     }
-                }
-            )
+                    .padding(horizontal = 8.dp)
+            ) {
+                Text(
+                    text = readinessActionLabel,
+                    color = c.textAccent,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp
+                )
+            }
         }
     }
 }
@@ -3634,9 +3648,36 @@ private fun BottomNavTabItem(
 private fun QuickVectorIcon(
     kind: QuickIconKind,
     tint: Color,
-    size: Dp
+    size: Dp,
+    contentDesc: String? = null
 ) {
-    Canvas(modifier = Modifier.size(size)) {
+    val iconDesc = contentDesc ?: when (kind) {
+        QuickIconKind.SEND -> "Send"
+        QuickIconKind.RECEIVE -> "Receive"
+        QuickIconKind.HISTORY -> "History"
+        QuickIconKind.SETTINGS -> "Settings"
+        QuickIconKind.IMAGE -> "Image"
+        QuickIconKind.VIDEO -> "Video"
+        QuickIconKind.DOC -> "Document"
+        QuickIconKind.AUDIO -> "Audio"
+        QuickIconKind.LINK -> "Link"
+        QuickIconKind.FOLDER -> "Files"
+        QuickIconKind.SUN -> "Light mode"
+        QuickIconKind.MOON -> "Dark mode"
+        QuickIconKind.REFRESH -> "Refresh"
+        QuickIconKind.CHECK -> "Completed"
+        QuickIconKind.CLOSE -> "Close"
+        QuickIconKind.PLUS -> "Add"
+        QuickIconKind.SEARCH -> "Search"
+        QuickIconKind.BLUETOOTH -> "Bluetooth"
+        QuickIconKind.UPLOAD -> "Upload"
+        QuickIconKind.DOWNLOAD -> "Download"
+    }
+    Canvas(
+        modifier = Modifier
+            .size(size)
+            .semantics { contentDescription = iconDesc }
+    ) {
         val w = this.size.width
         val h = this.size.height
         val sw = (w * 0.095f).coerceAtLeast(1.6.dp.toPx())
@@ -3787,60 +3828,5 @@ private fun QuickVectorIcon(
                 drawPath(bt, color = tint, style = stroke)
             }
         }
-    }
-}
-
-private fun canOpenOrShareHistoryItem(item: ReceivedItem): Boolean =
-    item.isUrl || !item.isOutgoing || item.pathOrUrl.startsWith("content://") || item.pathOrUrl.startsWith("/")
-
-private fun openFileWithProvider(context: Context, path: String, fallback: () -> Unit) {
-    try {
-        val contentUri = path.toUri().takeIf { it.scheme == "content" }
-        val uri = contentUri ?: File(path).let { file ->
-            if (!file.exists()) {
-                fallback()
-                return
-            }
-            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        }
-        val ext = File(path.substringBefore('?')).extension.lowercase()
-        val mime = context.contentResolver.getType(uri)
-            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(Intent.createChooser(intent, "Open received file"))
-    } catch (_: Throwable) {
-        fallback()
-    }
-}
-
-private fun shareFileOrUrl(context: Context, item: ReceivedItem) {
-    try {
-        if (item.isUrl) {
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, item.pathOrUrl)
-            }
-            context.startActivity(Intent.createChooser(intent, "Share link"))
-            return
-        }
-        val uri = item.pathOrUrl.toUri().takeIf { it.scheme == "content" }
-            ?: File(item.pathOrUrl).let { file ->
-                if (!file.exists()) return
-                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-            }
-        val mime = context.contentResolver.getType(uri)
-            ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(File(item.title).extension.lowercase()) ?: "*/*"
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = mime
-            putExtra(Intent.EXTRA_STREAM, uri)
-            clipData = ClipData.newRawUri("GlideDrop file", uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(Intent.createChooser(intent, "Share ${item.title}"))
-    } catch (_: Throwable) {
-        Toast.makeText(context, "Unable to share file", Toast.LENGTH_SHORT).show()
     }
 }

@@ -60,11 +60,56 @@ object GlideDropCodec {
         }
     }
 
+    private val UNSAFE_FILENAME_CHARS = Regex("[\\x00-\\x1f\\x7f-\\x9f/\\\\:*?\"<>|\\p{Cf}]")
+    private const val MAX_SAFE_FILENAME_UTF8_BYTES = 239 // 255-byte FS limit minus 16 bytes for duplicate suffixes
+
     fun safeFileName(rawPath: String): String {
-        val base = rawPath.replace('\\', '/').substringAfterLast('/').trim()
-        val cleaned = base.replace(Regex("[\\x00-\\x1f\\x7f-\\x9f/\\\\]"), "_")
-            .trimStart('.')
-        return cleaned.ifEmpty { "glidedrop_file" }.take(240)
+        val trimmedPath = rawPath.replace('\\', '/').trimEnd('/')
+        val base = trimmedPath.substringAfterLast('/').trim()
+        val cleaned = UNSAFE_FILENAME_CHARS.replace(base, "_")
+            .trimStart('.', '-')
+            .trimEnd(' ', '.')
+        val fallback = cleaned.ifEmpty { "glidedrop_file" }
+        return truncateUtf8PreservingExtension(fallback, MAX_SAFE_FILENAME_UTF8_BYTES)
+    }
+
+    private fun truncateUtf8PreservingExtension(name: String, maxBytes: Int): String {
+        if (name.toByteArray(StandardCharsets.UTF_8).size <= maxBytes) return name
+        val dot = name.lastIndexOf('.')
+        val hasExt = dot > 0 && dot < name.length - 1
+        if (hasExt) {
+            val ext = name.substring(dot)
+            val extBytes = ext.toByteArray(StandardCharsets.UTF_8).size
+            if (extBytes < maxBytes - 1) {
+                val stemBudget = maxBytes - extBytes
+                val truncatedStem = truncateUtf8(name.substring(0, dot), stemBudget).trimEnd(' ', '.')
+                if (truncatedStem.isNotEmpty()) {
+                    return truncatedStem + ext
+                }
+            }
+        }
+        return truncateUtf8(name, maxBytes).ifEmpty { "glidedrop_file" }
+    }
+
+    private fun truncateUtf8(text: String, maxBytes: Int): String {
+        val sb = StringBuilder(text.length)
+        var bytes = 0
+        var i = 0
+        while (i < text.length) {
+            val cp = text.codePointAt(i)
+            val charCount = Character.charCount(cp)
+            val cpBytes = when {
+                cp <= 0x7F -> 1
+                cp <= 0x7FF -> 2
+                cp <= 0xFFFF -> 3
+                else -> 4
+            }
+            if (bytes + cpBytes > maxBytes) break
+            sb.appendCodePoint(cp)
+            bytes += cpBytes
+            i += charCount
+        }
+        return sb.toString()
     }
 
     // =========================================================================
@@ -576,6 +621,62 @@ object GlideDropCodec {
     }
 
     private const val MAX_CPIO_TRAILING_PADDING_BYTES = 65536
+    const val DEFAULT_MAX_CPIO_ENTRIES = 4096
+    private const val CPIO_HEADER_OVERHEAD_PER_ENTRY_BYTES = 8192L
+    private const val STORAGE_EXPANSION_HEADROOM_BYTES = 16L * 1024L * 1024L
+
+    private fun parseCpioInt(field: String, radix: Int, label: String): Int {
+        return try {
+            field.toInt(radix)
+        } catch (e: NumberFormatException) {
+            throw IOException("Invalid CPIO $label field: '$field'", e)
+        }
+    }
+
+    private fun parseCpioLong(field: String, radix: Int, label: String): Long {
+        return try {
+            field.toLong(radix)
+        } catch (e: NumberFormatException) {
+            throw IOException("Invalid CPIO $label field: '$field'", e)
+        }
+    }
+
+    private fun parseCpioUnsignedLong(field: String, radix: Int, label: String): Long {
+        return try {
+            java.lang.Long.parseUnsignedLong(field, radix)
+        } catch (e: NumberFormatException) {
+            throw IOException("Invalid CPIO $label field: '$field'", e)
+        }
+    }
+
+    private fun computeEffectiveMaxExpandedBytes(
+        requestedMax: Long,
+        approvedFiles: List<ApprovedFile>?,
+        availableStorageBytes: (() -> Long)?
+    ): Long {
+        if (requestedMax != Long.MAX_VALUE) return requestedMax
+        if (approvedFiles != null && approvedFiles.all { it.size != null }) {
+            var total = MAX_CPIO_TRAILING_PADDING_BYTES.toLong()
+            val entryBudget = (approvedFiles.size.toLong() + 16L) * CPIO_HEADER_OVERHEAD_PER_ENTRY_BYTES
+            total = if (Long.MAX_VALUE - total < entryBudget) Long.MAX_VALUE else total + entryBudget
+            for (file in approvedFiles) {
+                val sz = file.size ?: 0L
+                total = if (Long.MAX_VALUE - total < sz) Long.MAX_VALUE else total + sz
+            }
+            return total
+        }
+        if (availableStorageBytes != null) {
+            val avail = runCatching { availableStorageBytes.invoke() }.getOrNull()
+            if (avail != null && avail >= 0L) {
+                return if (Long.MAX_VALUE - avail < STORAGE_EXPANSION_HEADROOM_BYTES) {
+                    Long.MAX_VALUE
+                } else {
+                    avail + STORAGE_EXPANSION_HEADROOM_BYTES
+                }
+            }
+        }
+        return requestedMax
+    }
 
     data class ApprovedFile(val name: String, val size: Long? = null)
 
@@ -586,9 +687,9 @@ object GlideDropCodec {
 
     /**
      * Streams validated regular CPIO entries directly to caller-provided output streams.
-     * Validates all CPIO headers/sizes, approved-file manifests, expansion bounds, TRAILER!!!,
-     * trailing padding, and DVZip/gzip EOF/footers before returning. On any error or
-     * cancellation, [onRollbackEntry] is invoked for every entry handle opened so far.
+     * Validates all CPIO headers/sizes, approved-file manifests, expansion bounds, entry-count
+     * limits, TRAILER!!!, trailing padding, and DVZip/gzip EOF/footers before returning. On any
+     * error or cancellation, [onRollbackEntry] is invoked for every entry handle opened so far.
      */
     fun <T> extractDvzipCpioStreaming(
         rawIn: InputStream,
@@ -597,9 +698,16 @@ object GlideDropCodec {
         approvedFiles: List<ApprovedFile>? = null,
         checkCancelled: (() -> Unit)? = null,
         openEntryOutput: (StreamedEntrySpec) -> Pair<T, OutputStream>,
-        onRollbackEntry: (T) -> Unit = {}
+        onRollbackEntry: (T) -> Unit = {},
+        maxEntries: Int = DEFAULT_MAX_CPIO_ENTRIES
     ): List<T> {
         require(maxExpandedBytes >= 0) { "Negative expansion limit" }
+        require(maxEntries >= 0) { "Negative maxEntries limit" }
+        val effectiveMaxExpandedBytes = computeEffectiveMaxExpandedBytes(
+            requestedMax = maxExpandedBytes,
+            approvedFiles = approvedFiles,
+            availableStorageBytes = availableStorageBytes
+        )
         val remaining = approvedFiles?.map {
             require(it.size == null || it.size >= 0) { "Negative approved file size" }
             it.copy(name = safeFileName(it.name))
@@ -620,12 +728,12 @@ object GlideDropCodec {
                     }
                     override fun read(b: ByteArray, off: Int, len: Int): Int {
                         if (len == 0) return 0
-                        if (expanded >= maxExpandedBytes) {
+                        if (expanded >= effectiveMaxExpandedBytes) {
                             // Permit an EOF probe at the exact cap, including footer/checksum validation.
                             if (decoded.read() < 0) return -1
-                            throw IOException("Expanded archive exceeds limit: $maxExpandedBytes")
+                            throw IOException("Expanded archive exceeds limit: $effectiveMaxExpandedBytes")
                         }
-                        val n = decoded.read(b, off, minOf(len.toLong(), maxExpandedBytes - expanded).toInt())
+                        val n = decoded.read(b, off, minOf(len.toLong(), effectiveMaxExpandedBytes - expanded).toInt())
                         if (n > 0) expanded += n
                         return n
                     }
@@ -642,6 +750,7 @@ object GlideDropCodec {
                     return off
                 }
 
+                var entryCount = 0
                 while (true) {
                     checkCancelled?.invoke()
                     val magicBuf = ByteArray(6)
@@ -660,27 +769,27 @@ object GlideDropCodec {
                             val hdr = ByteArray(70)
                             if (readExact(cpioStream, hdr, 70) < 70) throw EOFException("Truncated odc header")
                             val hStr = String(hdr, StandardCharsets.US_ASCII)
-                            mode = hStr.substring(12, 18).toInt(8)
-                            nameSize = hStr.substring(53, 59).toInt(8)
-                            fileSize = hStr.substring(59, 70).toLong(8)
+                            mode = parseCpioInt(hStr.substring(12, 18), 8, "odc mode")
+                            nameSize = parseCpioInt(hStr.substring(53, 59), 8, "odc nameSize")
+                            fileSize = parseCpioLong(hStr.substring(59, 70), 8, "odc fileSize")
                             isNewc = false
                         }
                         "070701", "070702" -> {
                             val hdr = ByteArray(104)
                             if (readExact(cpioStream, hdr, 104) < 104) throw EOFException("Truncated newc header")
                             val hStr = String(hdr, StandardCharsets.US_ASCII)
-                            mode = hStr.substring(8, 16).toInt(16)
-                            fileSize = hStr.substring(48, 56).toLong(16)
-                            nameSize = hStr.substring(88, 96).toInt(16)
+                            mode = parseCpioInt(hStr.substring(8, 16), 16, "newc mode")
+                            fileSize = parseCpioLong(hStr.substring(48, 56), 16, "newc fileSize")
+                            nameSize = parseCpioInt(hStr.substring(88, 96), 16, "newc nameSize")
                             isNewc = true
                         }
                         "070764" -> {
                             val hdr = ByteArray(96)
                             if (readExact(cpioStream, hdr, 96) < 96) throw EOFException("Truncated 070764 header")
                             val hStr = String(hdr, StandardCharsets.US_ASCII)
-                            mode = hStr.substring(16, 24).toInt(16)
-                            fileSize = java.lang.Long.parseUnsignedLong(hStr.substring(64, 80), 16)
-                            nameSize = hStr.substring(80, 88).toInt(16)
+                            mode = parseCpioInt(hStr.substring(16, 24), 16, "070764 mode")
+                            fileSize = parseCpioUnsignedLong(hStr.substring(64, 80), 16, "070764 fileSize")
+                            nameSize = parseCpioInt(hStr.substring(80, 88), 16, "070764 nameSize")
                             isNewc = false
                         }
                         else -> throw IllegalArgumentException("Invalid CPIO magic: $magic")
@@ -707,6 +816,11 @@ object GlideDropCodec {
                         break
                     }
 
+                    entryCount++
+                    if (entryCount > maxEntries) {
+                        throw IOException("CPIO archive exceeds maximum entry count: $maxEntries")
+                    }
+
                     val isRegularFile = (mode and 61440) == 32768 // (mode & 0170000) == 0100000
                     if (isRegularFile) {
                         val baseName = safeFileName(rawName)
@@ -718,14 +832,14 @@ object GlideDropCodec {
                                 ?: throw IOException("CPIO entry is not in approved manifest: $baseName ($fileSize bytes)")
                             if (count == 1) remaining.remove(match) else remaining[match] = count - 1
                         }
-                        if (fileSize > maxExpandedBytes - cpioStream.expanded) {
-                            throw IOException("Expanded archive exceeds limit: $maxExpandedBytes")
-                        }
                         if (availableStorageBytes != null) {
                             val availableBytes = availableStorageBytes.invoke()
                             if (availableBytes < fileSize) {
                                 throw IOException("Insufficient storage space for $baseName: required $fileSize B, available $availableBytes B")
                             }
+                        }
+                        if (fileSize > effectiveMaxExpandedBytes - cpioStream.expanded) {
+                            throw IOException("Expanded archive exceeds limit: $effectiveMaxExpandedBytes")
                         }
                         checkCancelled?.invoke()
                         val (handle, outStream) = openEntryOutput(StreamedEntrySpec(baseName, fileSize))
@@ -748,18 +862,10 @@ object GlideDropCodec {
                         // Senders (macOS sharingd and GlideDrop for Mac) emit an empty "." root
                         // directory entry before files. Empty directories are never materialised
                         // (output is flattened), so they are safe; any other non-regular entry
-                        // (symlink, device, FIFO, or a directory carrying data) stays rejected.
+                        // (symlink, device, FIFO, or a directory carrying data) is rejected outright.
                         val isEmptyDirectory = (mode and 61440) == 16384 && fileSize == 0L
-                        if (remaining != null && !isEmptyDirectory) {
-                            throw IOException("Non-regular CPIO entry is not approved: $rawName")
-                        }
-                        var left = fileSize
-                        while (left > 0) {
-                            checkCancelled?.invoke()
-                            val want = minOf(ioBuf.size.toLong(), left).toInt()
-                            val n = cpioStream.read(ioBuf, 0, want)
-                            if (n <= 0) throw EOFException("Truncated CPIO non-file entry")
-                            left -= n
+                        if (!isEmptyDirectory) {
+                            throw IOException("Non-regular CPIO entry is rejected: $rawName (mode=${mode.toString(8)})")
                         }
                     }
 
@@ -809,7 +915,8 @@ object GlideDropCodec {
         destDir: File,
         context: Context? = null,
         maxExpandedBytes: Long = Long.MAX_VALUE,
-        approvedFiles: List<ApprovedFile>? = null
+        approvedFiles: List<ApprovedFile>? = null,
+        maxEntries: Int = DEFAULT_MAX_CPIO_ENTRIES
     ): List<File> {
         destDir.mkdirs()
         val destination = destDir.canonicalFile
@@ -822,6 +929,7 @@ object GlideDropCodec {
                 maxExpandedBytes = maxExpandedBytes,
                 availableStorageBytes = { availableStorageBytes(destination, context) },
                 approvedFiles = approvedFiles,
+                maxEntries = maxEntries,
                 openEntryOutput = { spec ->
                     val partFile = staging.resolve("${entryIdx++}.part").toFile()
                     val out = BufferedOutputStream(

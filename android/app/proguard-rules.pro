@@ -1,5 +1,6 @@
 # GlideDrop ProGuard / R8 keep rules
--keep class io.github.jakharamit44.glidedrop.** { *; }
--keep class org.bouncycastle.** { *; }
+-keep public class io.github.jakharamit44.glidedrop.MainActivity { *; }
+-keep public class io.github.jakharamit44.glidedrop.GlideDropService { *; }
+-keep class io.github.jakharamit44.glidedrop.GlideDropViewModel { *; }
+-keepattributes SourceFile,LineNumberTable
 -dontwarn org.bouncycastle.**
-

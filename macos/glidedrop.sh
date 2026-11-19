@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${GLIDEDROP_STATE_DIR:-$HOME/.glidedrop}"
 mkdir -p "$STATE_DIR"
-chmod 700 "$STATE_DIR" 2>/dev/null || true
+chmod 700 "$STATE_DIR"
 
 PID_FILE="$STATE_DIR/daemon.pid"
 AWDL_MDNS_PID_FILE="$STATE_DIR/awdl-mdns.pid"
@@ -29,10 +29,14 @@ PROXY_PORT=0
 
 ensure_cert() {
   if [[ ! -f "$STATE_DIR/cert.pem" || ! -f "$STATE_DIR/key.pem" ]]; then
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
-      -keyout "$STATE_DIR/key.pem" -out "$STATE_DIR/cert.pem" \
-      -days 3650 -nodes -subj "/CN=glidedrop" >/dev/null 2>&1
+    (
+      umask 077
+      openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout "$STATE_DIR/key.pem" -out "$STATE_DIR/cert.pem" \
+        -days 3650 -nodes -subj "/CN=glidedrop" >/dev/null 2>&1
+    )
   fi
+  chmod 600 "$STATE_DIR/key.pem"
 }
 
 ensure_ble_bin() {
@@ -219,7 +223,7 @@ start_daemons() {
 
   # Start HTTPS receiver + Finder Share Android proxy (OS-assigned ports)
   nohup python3 -u - "$STATE_DIR/cert.pem" "$STATE_DIR/key.pem" "$PORT" "$PROXY_PORT" "$SCRIPT_DIR/glidedrop.sh" >"$LOG_FILE" 2>&1 << 'PYEOF' &
-import gzip, hmac, io, ipaddress, json, os, plistlib, queue, re, select, shutil, socket, ssl, struct, subprocess, sys, tempfile, threading, time, uuid, zlib
+import gzip, hmac, io, ipaddress, json, os, plistlib, queue, re, select, shutil, socket, ssl, struct, subprocess, sys, tempfile, threading, time, unicodedata, uuid, zlib
 from pathlib import Path
 
 CERT_FILE, KEY_FILE, PORT, PROXY_PORT, SCRIPT_PATH = (
@@ -1182,7 +1186,12 @@ def extract_cpio_stream(stream, dest_dir: Path, fsync_files: bool = True, approv
                     if item not in remaining_manifest:
                         raise ValueError("CPIO entry does not match approved file manifest")
                     remaining_manifest.remove(item)
-                safe_name = raw_base.lstrip(".") or "glidedrop_file"
+                import unicodedata as _ud
+                cleaned = "".join(
+                    "_" if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or _ud.category(ch) == "Cf" or ch in '/\\:*?"<>|') else ch
+                    for ch in raw_base.strip()
+                )
+                safe_name = cleaned.lstrip(".-").rstrip(" .") or "glidedrop_file"
                 target = dest_dir / safe_name
                 if target.resolve().parent == dest_resolved:
                     free_bytes = shutil.disk_usage(dest_resolved).free
@@ -1230,14 +1239,7 @@ def extract_cpio_stream(stream, dest_dir: Path, fsync_files: bool = True, approv
                             part_target.unlink(missing_ok=True)
                         raise
                 else:
-                    rem = filesize
-                    while rem > 0:
-                        c = stream.read(min(262144, rem))
-                        if not c:
-                            break
-                        rem -= len(c)
-                    if rem > 0:
-                        raise IOError(f"Transfer stream truncated: expected {filesize} bytes, missing {rem} bytes")
+                    raise ValueError(f"Rejected CPIO entry escaping destination directory: {safe_name}")
         else:
             rem = filesize
             while rem > 0:
@@ -1947,17 +1949,18 @@ def watch_awdl_mdns():
             if new_ip and (new_ip != cur_ip or bridge_port != cur_port or (proc and proc.poll() is not None)):
                 if proc and proc.poll() is None:
                     proc.terminate()
+                safe_instance_id = re.sub(r"[^A-Za-z0-9._-]", "", str(instance_id)).lstrip("-") or "glidedrop"
                 proc = subprocess.Popen(
                     # Required by Apple sharingd on awdl0 for Finder Share Sheet peer discovery
-                    ["dns-sd", "-i", "awdl0", "-P", instance_id, "_airdrop._tcp", "local.", str(bridge_port), "glidedrop.local.", new_ip, "flags=136"],
+                    ["dns-sd", "-i", "awdl0", "-P", safe_instance_id, "_airdrop._tcp", "local.", str(bridge_port), "glidedrop.local.", new_ip, "flags=136"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
                 pid_file.write_text(str(proc.pid))
                 cur_ip = new_ip
                 cur_port = bridge_port
-                print(f"[AWDL-mDNS] Advertising active peer ({active_peers[0].get('name')}) on awdl0 at {cur_ip}:{bridge_port} (id={instance_id}, PID {proc.pid})")
-        except Exception:
-            pass
+                print(f"[AWDL-mDNS] Advertising active peer ({active_peers[0].get('name')}) on awdl0 at {cur_ip}:{bridge_port} (id={safe_instance_id}, PID {proc.pid})")
+        except Exception as exc:
+            print(f"[AWDL-mDNS] Error updating mDNS advertisement: {exc}", file=sys.stderr)
         time.sleep(2.0)
 
 FINDER_PROXY_SOCK = STATE_DIR / "finder_proxy.sock"

@@ -2,6 +2,19 @@
 
 All notable changes to GlideDrop are documented in this file.
 
+## [v3.0.5]
+### Security
+- **Android `ACTION_VIEW` URI validation**: Added `UriSecurity` to enforce `http`/`https` with a non-empty host before launching peer-supplied URLs in `GlideDropService` and `MainActivity`.
+- **Bounded DVZip/CPIO extraction**: Enforced expansion caps derived from approved metadata/available storage, added a 4096-entry limit, rejected non-regular CPIO modes outright (except empty directory headers), and converted malformed CPIO hex/octal headers into typed `IOException`s.
+- **BiDi & filesystem filename sanitization**: Stripped Unicode BiDi/format characters (`\p{Cf}`), FAT32/FUSE reserved characters, control characters, and leading dashes/dots while preserving extensions within a 239-byte UTF-8 budget on Android and macOS.
+- **macOS `claude_processor.py` hardening**: Rejected symlinks and paths outside the drop directory before sensitivity checks, failed closed on unreadable files, wrapped Ollama untrusted inputs with code-fence escaping, and sniffed image magic bytes with a 15s `sips` timeout.
+- **macOS TLS key & CPIO stream hardening**: Generated `key.pem` under `umask 077` with `chmod 600`, enforced `chmod 700 "$STATE_DIR"`, and aborted CPIO streams immediately on path-escaping entries.
+
+### Fixed
+- **Proxy socket & counter leaks**: Registered accepted sockets in `EmbeddedProxyServer` before executor submission, cleaned up on submission failure, reset `clientCount` on restart, and aborted outbound connect retries after `stop()`.
+- **Android lifecycle, rotation & main-thread I/O**: Extracted `GlideDropViewModel` and `FileShareHelpers` so staged files and modal drafts survive rotation, fixed share intent replay (`savedInstanceState == null`, `setIntent(intent)`), supported `file://` URIs, and moved `ContentResolver`/`FileProvider` I/O off the main thread.
+- **Accessibility, permissions & build**: Restored focus/ripple indication, added `Role.Button`, `48.dp` min touch targets, and `QuickVectorIcon` content descriptions; scoped location permissions to `maxSdkVersion="32"`; fixed `versionCode` encoding; enabled R8 minification & resource shrinking; replaced the fake storage fallback with `StorageState.Unavailable`; and updated `macos/build.sh` to produce a universal `arm64 + x86_64` binary.
+
 ## [v3.0.4]
 ### Security
 - **Swift command-line injection (`swift/command-line-injection`)**: `restoreMacInternetWifi` in `glidedrop-daemon.swift` now reads the previously active Wi-Fi SSID from thread-safe process memory (`setSavedHomeWifiSsid`/`getSavedHomeWifiSsid`) instead of passing file contents from `previous_wifi_ssid.txt` to `/usr/sbin/networksetup`, and rejects option-like (`-`) or `DIRECT-*` names.

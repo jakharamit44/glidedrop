@@ -7,7 +7,18 @@ VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "2.0.0")"
 
 echo "[+] Building GlideDrop macOS daemon (v${VERSION})..."
 mkdir -p "$HOME/.glidedrop"
-xcrun swiftc -O "$SCRIPT_DIR/glidedrop-daemon.swift" -o "$HOME/.glidedrop/glidedrop-daemon"
+DAEMON_OUT="$HOME/.glidedrop/glidedrop-daemon"
+ARM64_BIN="$(mktemp /tmp/glidedrop-arm64.XXXXXX)"
+X86_64_BIN="$(mktemp /tmp/glidedrop-x86_64.XXXXXX)"
+trap 'rm -f "$ARM64_BIN" "$X86_64_BIN"' EXIT
+if xcrun swiftc -O -target arm64-apple-macos13.0 "$SCRIPT_DIR/glidedrop-daemon.swift" -o "$ARM64_BIN" && \
+   xcrun swiftc -O -target x86_64-apple-macos13.0 "$SCRIPT_DIR/glidedrop-daemon.swift" -o "$X86_64_BIN"; then
+  lipo -create "$ARM64_BIN" "$X86_64_BIN" -output "$DAEMON_OUT"
+  echo "[+] Built universal binary (arm64 + x86_64)."
+else
+  echo "[!] Universal cross-compile unavailable; falling back to host architecture." >&2
+  xcrun swiftc -O "$SCRIPT_DIR/glidedrop-daemon.swift" -o "$DAEMON_OUT"
+fi
 
 APP_DIR="$ROOT_DIR/GlideDrop.app"
 APP_MACOS="$APP_DIR/Contents/MacOS"

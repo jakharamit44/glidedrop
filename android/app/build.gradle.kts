@@ -9,9 +9,13 @@ android {
         if (vf.exists()) vf.readText().trim() else "2.0.0"
     }
     val versionParts = appVersionName.split(".").map { it.toIntOrNull() ?: 0 }
-    val appVersionCode = (versionParts.getOrElse(0) { 3 } * 100) +
-        (versionParts.getOrElse(1) { 0 } * 10) +
-        versionParts.getOrElse(2) { 0 }
+    val versionMajor = versionParts.getOrElse(0) { 3 }
+    val versionMinor = versionParts.getOrElse(1) { 0 }
+    val versionPatch = versionParts.getOrElse(2) { 0 }
+    require(versionMinor in 0..99 && versionPatch in 0..99) {
+        "Invalid semantic version for versionCode encoding: $appVersionName (minor/patch must be 0..99)"
+    }
+    val appVersionCode = (versionMajor * 10_000) + (versionMinor * 100) + versionPatch
 
     namespace = "io.github.jakharamit44.glidedrop"
     compileSdk = 37
@@ -47,7 +51,8 @@ android {
     buildTypes {
         release {
             isDebuggable = false
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")

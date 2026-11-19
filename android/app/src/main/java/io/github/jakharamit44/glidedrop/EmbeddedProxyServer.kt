@@ -614,6 +614,7 @@ class EmbeddedProxyServer internal constructor(
     )
 
     private val isRunning = AtomicBoolean(false)
+    private val isStopped = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
     private var executor: ExecutorService? = null
@@ -644,6 +645,8 @@ class EmbeddedProxyServer internal constructor(
     @Synchronized
     fun start(): Boolean {
         if (isRunning.getAndSet(true)) return true
+        isStopped.set(false)
+        clientCount.set(0)
         try {
             var srv = ServerSocket()
             try {
@@ -689,21 +692,37 @@ class EmbeddedProxyServer internal constructor(
                         continue
                     }
 
-                    executor?.submit {
-                        try {
-                            handleClient(client)
-                        } catch (_: EOFException) {
-                            // Client closed before completing handshake
-                        } catch (_: SocketException) {
-                            // Client reset or closed connection (e.g. P2P teardown / probe)
-                        } catch (t: Throwable) {
-                            if (isRunning.get()) {
-                                logger?.invoke("EmbeddedProxyServer client error: ${t.message}")
+                    // Register before submission so stop() closes queued sockets even before worker starts.
+                    activeSockets.add(client)
+                    val exec = executor
+                    if (exec == null || !isRunning.get()) {
+                        activeSockets.remove(client)
+                        clientCount.decrementAndGet()
+                        runCatching { client.close() }
+                        break
+                    }
+                    try {
+                        exec.submit {
+                            try {
+                                handleClient(client)
+                            } catch (_: EOFException) {
+                                // Client closed before completing handshake
+                            } catch (_: SocketException) {
+                                // Client reset or closed connection (e.g. P2P teardown / probe)
+                            } catch (t: Throwable) {
+                                if (isRunning.get()) {
+                                    logger?.invoke("EmbeddedProxyServer client error: ${t.message}")
+                                }
+                            } finally {
+                                activeSockets.remove(client)
+                                clientCount.decrementAndGet()
+                                runCatching { client.close() }
                             }
-                        } finally {
-                            clientCount.decrementAndGet()
-                            runCatching { client.close() }
                         }
+                    } catch (_: Throwable) {
+                        activeSockets.remove(client)
+                        clientCount.decrementAndGet()
+                        runCatching { client.close() }
                     }
                 }
             }, "EmbeddedProxy-Accept").apply {
@@ -721,6 +740,7 @@ class EmbeddedProxyServer internal constructor(
 
     @Synchronized
     fun stop() {
+        isStopped.set(true)
         if (!isRunning.getAndSet(false)) return
         runCatching { serverSocket?.close() }
         serverSocket = null
@@ -1272,6 +1292,9 @@ class EmbeddedProxyServer internal constructor(
         val deadlineMs = System.currentTimeMillis() + OUTBOUND_CONNECT_TIMEOUT_MS
         var lastError: Exception? = null
         for (i in addresses.indices) {
+            if (isStopped.get()) {
+                throw IOException("Proxy server stopped during outbound connect to $host:$port")
+            }
             val remainingMs = (deadlineMs - System.currentTimeMillis()).toInt()
             if (remainingMs <= 0) break
             val remainingCount = addresses.size - i

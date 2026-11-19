@@ -12,7 +12,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.net.toUri
-import java.lang.ref.WeakReference
 
 class GlideDropService : Service() {
 
@@ -22,18 +21,19 @@ class GlideDropService : Service() {
         private const val CHANNEL_RX = "glidedrop_rx"
         private const val NOTIF_ID_STATUS = 1001
         private const val NOTIF_ID_CONSENT = 1998
+        private const val NOTIF_ID_PROGRESS = 1999
         private var rxNotifId = 2000
 
         @Volatile
-        private var nodeRef = WeakReference<GlideDropNode>(null)
+        private var sharedNode: GlideDropNode? = null
 
-        private fun peekNode(): GlideDropNode? = nodeRef.get()
+        private fun peekNode(): GlideDropNode? = sharedNode
 
         fun getNode(context: Context): GlideDropNode {
-            nodeRef.get()?.let { return it }
+            sharedNode?.let { return it }
             return synchronized(this) {
-                nodeRef.get()?.let { return it }
-                GlideDropNode(context.applicationContext).also { nodeRef = WeakReference(it) }
+                sharedNode?.let { return it }
+                GlideDropNode(context.applicationContext).also { sharedNode = it }
             }
         }
     }
@@ -106,7 +106,7 @@ class GlideDropService : Service() {
         node.onTransferProgress = { fileName, pct, doneBytes, totalBytes, speedBps, isSending, isConnecting, phase ->
             if (pct >= 100 || pct < 0) {
                 runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
-                nm.cancel(1999)
+                nm.cancel(NOTIF_ID_PROGRESS)
             } else if (isConnecting) {
                 runCatching { wakeLock?.acquire(15 * 60 * 1000L) }
                 val connectTitle = if (isSending) "Connecting to GlideDrop peer…" else "Incoming GlideDrop connection…"
@@ -120,7 +120,7 @@ class GlideDropService : Service() {
                     .setOnlyAlertOnce(true)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .build()
-                nm.notify(1999, progressNotif)
+                nm.notify(NOTIF_ID_PROGRESS, progressNotif)
             } else {
                 runCatching { wakeLock?.acquire(15 * 60 * 1000L) }
                 val speedStr = if (speedBps > 0L) " • ${GlideDropNode.formatSpeed(speedBps)}" else ""
@@ -134,7 +134,7 @@ class GlideDropService : Service() {
                     .setOnlyAlertOnce(true)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .build()
-                nm.notify(1999, progressNotif)
+                nm.notify(NOTIF_ID_PROGRESS, progressNotif)
             }
         }
         node.onConsentNotification = { title, body ->
@@ -164,10 +164,18 @@ class GlideDropService : Service() {
             }
         }
         node.onItemReceived = { item ->
-            nm.cancel(1999)
+            nm.cancel(NOTIF_ID_PROGRESS)
+            nm.cancel(NOTIF_ID_CONSENT)
             val notifId = 2000 + (rxNotifId++ % 50)
             val targetIntent = if (item.isUrl) {
-                Intent(Intent.ACTION_VIEW, item.pathOrUrl.toUri())
+                val safeUri = UriSecurity.parseSafeWebUri(item.pathOrUrl)
+                if (safeUri != null) {
+                    Intent(Intent.ACTION_VIEW, safeUri)
+                } else {
+                    Intent(this, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    }
+                }
             } else if (item.pathOrUrl.startsWith("content://")) {
                 val uri = item.pathOrUrl.toUri()
                 Intent(Intent.ACTION_VIEW).apply {

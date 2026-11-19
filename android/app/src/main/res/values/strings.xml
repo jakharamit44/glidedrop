@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">GlideDrop</string>
+    <string name="categories_title">Categories</string>
+    <string name="categories_subtitle">Select files to review before sending</string>
+    <string name="scanning_nearby_toast">Scanning nearby BLE + 5GHz P2P…</string>
+    <string name="storage_unavailable">Storage unavailable</string>
+    <string name="invalid_url_toast">Blocked unsupported URL scheme</string>
 </resources>
