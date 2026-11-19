@@ -2515,6 +2515,17 @@ func joinWifiDirectNetwork(iface: String, ssid: String, pass: String, logPrefix:
 
 /// Joins an ephemeral Wi-Fi Direct SoftAP and waits for DHCP to assign an IP matching the group,
 /// retrying join attempts when freshly started SoftAP beacons are not yet visible to macOS.
+func isWifiL2AssociatedToTarget(iface: String, ssid: String) -> Bool {
+    let rawSsid = currentRawWifiSsid(on: iface)
+    if !rawSsid.isEmpty {
+        return rawSsid == ssid
+    }
+    guard let cwIface = CWWiFiClient.shared().interface(withName: iface) ?? CWWiFiClient.shared().interface() else {
+        return false
+    }
+    return (cwIface.wlanChannel()?.channelNumber ?? 0) > 0 && cwIface.rssiValue() != 0
+}
+
 func associateWifiDirectWithRetry(
     iface: String,
     ssid: String,
@@ -2552,7 +2563,9 @@ func associateWifiDirectWithRetry(
             return resolved
         }
 
-        let retryCooldown: TimeInterval = joinAccepted ? 5.0 : wifiJoinBackoff(attempt: attempt)
+        let retryCooldown: TimeInterval = (joinAccepted && isWifiL2AssociatedToTarget(iface: iface, ssid: ssid))
+            ? 12.0
+            : (joinAccepted ? 5.0 : wifiJoinBackoff(attempt: attempt))
         if Date().timeIntervalSince(lastJoinAttemptAt) >= retryCooldown {
             if attempt >= maxAttempts { break }
             attempt += 1
@@ -3589,6 +3602,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
     var pingTimer: Timer?
     private let pingStateLock = NSLock()
     private var pingPeerDisconnected: Bool = false
+    private var incomingL2capChannelCount: Int = 0
     private var isPublishingL2cap: Bool = false
     private var hasPublishedGattService: Bool = false
 
@@ -3602,6 +3616,24 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
         pingStateLock.lock()
         defer { pingStateLock.unlock() }
         return pingPeerDisconnected
+    }
+
+    private func incrementIncomingL2capChannelCount() {
+        pingStateLock.lock()
+        incomingL2capChannelCount += 1
+        pingStateLock.unlock()
+    }
+
+    private func decrementIncomingL2capChannelCount() {
+        pingStateLock.lock()
+        incomingL2capChannelCount = max(0, incomingL2capChannelCount - 1)
+        pingStateLock.unlock()
+    }
+
+    func hasActiveIncomingL2capChannel() -> Bool {
+        pingStateLock.lock()
+        defer { pingStateLock.unlock() }
+        return incomingL2capChannelCount > 0
     }
 
     override init() {
@@ -3853,6 +3885,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
         }()
         let hasPendingAsk = FileManager.default.fileExists(atPath: STATE_DIR.appendingPathComponent("pending_ask.json").path)
         if isWp2pJoinActive() ||
+           hasActiveIncomingL2capChannel() ||
            hasPendingAsk ||
            hasActiveTxInProgressLock(now: now) ||
            hasActiveTxProgress ||
@@ -3860,7 +3893,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             if cm.state == .poweredOn && cm.isScanning {
                 cm.stopScan()
             }
-            if !isWp2pJoinActive() && !hasPendingAsk && isPingingPeer {
+            if !isWp2pJoinActive() && !hasActiveIncomingL2capChannel() && !hasPendingAsk && isPingingPeer {
                 isPingingPeer = false
                 pingChannel = nil
                 activePingPeripheral = nil
@@ -3948,6 +3981,17 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
         let macName = loadMacSettings().deviceName
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let cancelPeripheralIfSafe: () -> Void = {
+                guard let self = self else { return }
+                let nowTs = Date().timeIntervalSince1970
+                let askPending = FileManager.default.fileExists(atPath: STATE_DIR.appendingPathComponent("pending_ask.json").path)
+                if !self.hasActiveIncomingL2capChannel() &&
+                   !isWp2pJoinActive() &&
+                   !askPending &&
+                   !hasActiveTxInProgressLock(now: nowTs) {
+                    self.cm.cancelPeripheralConnection(peripheral)
+                }
+            }
             guard let inp = ch.inputStream, let out = ch.outputStream else {
                 DispatchQueue.main.async {
                     self?.pingChannel = nil
@@ -3955,7 +3999,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                     if self?.activePingPeripheral === peripheral {
                         self?.activePingPeripheral = nil
                     }
-                    self?.cm.cancelPeripheralConnection(peripheral)
+                    cancelPeripheralIfSafe()
                 }
                 return
             }
@@ -3970,7 +4014,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                     if self?.activePingPeripheral === peripheral {
                         self?.activePingPeripheral = nil
                     }
-                    self?.cm.cancelPeripheralConnection(peripheral)
+                    cancelPeripheralIfSafe()
                 }
             }
 
@@ -4253,12 +4297,14 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             return
         }
         guard let ch = channel, error == nil else { return }
+        incrementIncomingL2capChannelCount()
         activeChannels.append(ch)
         print("[BLE-Daemon] Incoming BLE L2CAP connection on PSM \(ch.psm)")
         fflush(stdout)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let inp = ch.inputStream, let out = ch.outputStream else {
+                self?.decrementIncomingL2capChannelCount()
                 DispatchQueue.main.async {
                     self?.activeChannels.removeAll { $0 === ch }
                 }
@@ -4267,6 +4313,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             inp.open()
             out.open()
             defer {
+                self?.decrementIncomingL2capChannelCount()
                 inp.close()
                 out.close()
                 DispatchQueue.main.async {
@@ -8378,7 +8425,7 @@ struct MacGlideDropMainView: View {
 
             // App Version Card
             let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
-                .flatMap { $0.isEmpty ? nil : $0 } ?? "3.0.6"
+                .flatMap { $0.isEmpty ? nil : $0 } ?? "3.0.7"
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("App Version")

@@ -3368,8 +3368,8 @@ private fun SettingsScreenTab(
                         @Suppress("DEPRECATION")
                         context.packageManager.getPackageInfo(context.packageName, 0)
                     }
-                    info.versionName?.takeIf { it.isNotBlank() } ?: "3.0.6"
-                }.getOrDefault("3.0.6")
+                    info.versionName?.takeIf { it.isNotBlank() } ?: "3.0.7"
+                }.getOrDefault("3.0.7")
             }
             Surface(
                 color = c.surfaceRaised,

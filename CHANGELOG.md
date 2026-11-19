@@ -2,6 +2,11 @@
 
 All notable changes to GlideDrop are documented in this file.
 
+## [v3.0.7]
+### Fixed
+- **BLE L2CAP heartbeat race condition (Android → Mac)**: Prevented macOS `BleGlideDropDaemon` from calling `cm.cancelPeripheralConnection` while an incoming L2CAP channel, W2P2 join, ask prompt, or active outgoing transfer is in progress, and gave Android's `sendOverBleL2cap` up to 1.5s extra to hand off to an active incoming heartbeat plus a `RETRYABLE_BLE_DROP` retry that preserves the 5 GHz Wi-Fi Direct group.
+- **5 GHz Wi-Fi Direct re-association loop during DHCP**: Added `isWifiL2AssociatedToTarget` in `glidedrop-daemon.swift` and extended the post-association retry cooldown from 5s to 12s while waiting for macOS DHCP IP assignment on `DIRECT-*` groups.
+
 ## [v3.0.6]
 ### Added
 - **In-app Version Display (Android & macOS)**: Added an **App Version** card in the **Settings** tab on both Android (`PackageManager` `versionName`) and macOS (`CFBundleShortVersionString`) so users can check their installed version directly inside the app.

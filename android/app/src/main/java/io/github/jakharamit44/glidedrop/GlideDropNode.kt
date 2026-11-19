@@ -2010,6 +2010,7 @@ class GlideDropNode(private val context: Context) {
 
     @Volatile
     private var pendingMacTx: PendingMacTx? = null
+    private val activeIncomingL2capCount = java.util.concurrent.atomic.AtomicInteger(0)
 
     private fun saveDirectSharePeer(peer: GlideDropPeer, remoteName: String) {
         prefs.edit {
@@ -3243,6 +3244,7 @@ class GlideDropNode(private val context: Context) {
 
     private enum class W2p2TransferState {
         NOT_ATTEMPTED,
+        RETRYABLE_BLE_DROP,
         FAILED_CLOSED,
         SUCCEEDED
     }
@@ -3394,18 +3396,20 @@ class GlideDropNode(private val context: Context) {
             log("${sendPhasePrefix}W2P2 ECDH negotiation failed: ${t.message}")
         }
 
-        if (!wp2pJoined && (w2p2PinRejected || w2p2JoinSent)) {
+        val isRetryableDrop = !wp2pJoined && !w2p2PinRejected && !transferCancelled
+        if (!wp2pJoined && !isRetryableDrop) {
             stopWifiDirectGroup()
         }
         return when {
             wp2pJoined -> if (txOk) W2p2TransferState.SUCCEEDED else W2p2TransferState.FAILED_CLOSED
-            w2p2PinRejected || w2p2JoinSent -> W2p2TransferState.FAILED_CLOSED
-            else -> W2p2TransferState.NOT_ATTEMPTED
+            isRetryableDrop -> W2p2TransferState.RETRYABLE_BLE_DROP
+            else -> W2p2TransferState.FAILED_CLOSED
         }
     }
 
     @SuppressLint("MissingPermission")
     private suspend fun handleBleL2capConnection(sock: BluetoothSocket) = withContext(Dispatchers.IO) {
+        activeIncomingL2capCount.incrementAndGet()
         val remoteAddr = runCatching { sock.remoteDevice?.address }.getOrNull() ?: "BLE"
         val receiveOwner = Any()
         var ownsReceiveTransfer = false
@@ -3523,7 +3527,8 @@ class GlideDropNode(private val context: Context) {
                                         txOk = true
                                         wp2pJoined = true
                                     }
-                                    W2p2TransferState.FAILED_CLOSED -> {
+                                    W2p2TransferState.FAILED_CLOSED,
+                                    W2p2TransferState.RETRYABLE_BLE_DROP -> {
                                         txOk = false
                                         wp2pJoined = true
                                     }
@@ -4029,6 +4034,8 @@ class GlideDropNode(private val context: Context) {
             try {
                 sock.close()
             } catch (_: Throwable) {
+            } finally {
+                activeIncomingL2capCount.decrementAndGet()
             }
         }
     }
@@ -4146,12 +4153,20 @@ class GlideDropNode(private val context: Context) {
                 log("Queued transfer for Mac BLE L2CAP P2P channel\u2026")
 
                 // Wait one heartbeat window (2.2s) if we already scanned the peer's PSM so we can connect directly without delay;
-                // otherwise wait full 12s for passive BLE heartbeat pickup.
+                // if an incoming heartbeat L2CAP socket is currently active, allow up to 1.5s extra for it to claim pendingMacTx.
                 val initialHeartbeatWaitMs = if (bleMacDevice != null && bleMacPsm > 0) 2_200L else 12_000L
                 val queueStartNs = System.nanoTime()
                 val initialHeartbeatDeadlineNs = queueStartNs + initialHeartbeatWaitMs * 1_000_000L
+                val maxExtraHeartbeatDeadlineNs = initialHeartbeatDeadlineNs + 1_500L * 1_000_000L
                 val totalHeartbeatDeadlineNs = queueStartNs + 14_000L * 1_000_000L
-                while (System.nanoTime() < initialHeartbeatDeadlineNs && !deferred.isCompleted && !tx.isClaimed && !transferCancelled) {
+                while (!deferred.isCompleted && !tx.isClaimed && !transferCancelled) {
+                    val nowNs = System.nanoTime()
+                    if (nowNs >= initialHeartbeatDeadlineNs) {
+                        val heartbeatInFlight = activeIncomingL2capCount.get() > 0
+                        if (!heartbeatInFlight || nowNs >= minOf(maxExtraHeartbeatDeadlineNs, totalHeartbeatDeadlineNs)) {
+                            break
+                        }
+                    }
                     kotlinx.coroutines.delay(100)
                 }
                 if (transferCancelled) {
@@ -4231,6 +4246,16 @@ class GlideDropNode(private val context: Context) {
                                 ) {
                                     W2p2TransferState.SUCCEEDED -> return@withLock true
                                     W2p2TransferState.FAILED_CLOSED -> return@withLock false
+                                    W2p2TransferState.RETRYABLE_BLE_DROP -> {
+                                        if (attempt < 2 && !transferCancelled) {
+                                            log("Direct BLE L2CAP dropped during W2P2 handshake; retrying (attempt ${attempt + 1})…")
+                                            restartBleScanOnly()
+                                            kotlinx.coroutines.delay(350)
+                                            continue
+                                        }
+                                        stopWifiDirectGroup()
+                                        return@withLock false
+                                    }
                                     W2p2TransferState.NOT_ATTEMPTED -> Unit
                                 }
 
