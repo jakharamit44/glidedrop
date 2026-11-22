@@ -4,25 +4,25 @@ Send files, photos, videos, links, and text notes directly between Android and M
 
 **Website & Documentation:** [jakharamit44.github.io/glidedrop](https://jakharamit44.github.io/glidedrop/)
 
-[![Release: v3.0.7](https://img.shields.io/badge/Release-v3.0.7-5360F5.svg)](https://github.com/jakharamit44/glidedrop/releases/latest)
+[![Release: v3.0.9](https://img.shields.io/badge/Release-v3.0.9-5360F5.svg)](https://github.com/jakharamit44/glidedrop/releases/latest)
 [![Platform: Android 12+](https://img.shields.io/badge/Android-12%2B%20%28API%2031%2B%29-16A34A.svg)](https://github.com/jakharamit44/glidedrop/releases/latest)
 [![Platform: macOS 13+](https://img.shields.io/badge/macOS-13%2B%20%28Apple%20Silicon%20%26%20Intel%29-0284C7.svg)](https://github.com/jakharamit44/glidedrop/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-334155.svg)](LICENSE)
 [![Status: Public Beta](https://img.shields.io/badge/Status-Public%20Beta-D97706.svg)](SECURITY.md)
 
 > [!WARNING]
-> **Public Beta (v3.0.7)**
+> **Public Beta (v3.0.9)**
 > Core BLE L2CAP, 5 GHz Wi-Fi Direct, and TLS transport layers are functional and covered by unit tests, while OEM Wi-Fi chipset and macOS edge cases continue to be refined. Review [SECURITY.md](SECURITY.md) before transferring sensitive data in untrusted RF spaces, and open issues via [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Downloads (v3.0.7)
+## Downloads (v3.0.9)
 
 Pre-compiled binaries and SHA-256 verification hashes are available on the [latest GitHub Release](https://github.com/jakharamit44/glidedrop/releases/latest).
 
 | Platform | Package | Target Requirements | Notes |
 | :--- | :--- | :--- | :--- |
-| **Android** | [`GlideDrop-v3.0.7.apk`](https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.apk) | Android 12+ (API 31+) | Universal APK for Samsung, Pixel, OnePlus, Xiaomi, Motorola, and AOSP devices |
-| **macOS (PKG)** | [`GlideDrop-v3.0.7.pkg`](https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.pkg) | macOS 13+ (Ventura, Sonoma, Sequoia) | Installs the app in `/Applications`. The app is not notarized (see below) |
-| **macOS (DMG)** | [`GlideDrop-v3.0.7.dmg`](https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.dmg) | macOS 13+ (Apple Silicon & Intel) | Drag-and-drop image. The app is not notarized (see below) |
+| **Android** | [`GlideDrop-v3.0.9.apk`](https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.apk) | Android 12+ (API 31+) | Universal APK for Samsung, Pixel, OnePlus, Xiaomi, Motorola, and AOSP devices |
+| **macOS (PKG)** | [`GlideDrop-v3.0.9.pkg`](https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.pkg) | macOS 13+ (Ventura, Sonoma, Sequoia) | Installs the app in `/Applications`. The app is not notarized (see below) |
+| **macOS (DMG)** | [`GlideDrop-v3.0.9.dmg`](https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.dmg) | macOS 13+ (Apple Silicon & Intel) | Drag-and-drop image. The app is not notarized (see below) |
 | **Checksums** | [`SHA256SUMS.txt`](https://github.com/jakharamit44/glidedrop/releases/latest/download/SHA256SUMS.txt) | All | SHA-256 hashes for verifying downloaded packages |
 
 ### Unnotarized macOS app and Gatekeeper
@@ -51,7 +51,7 @@ Android Device                                         macOS (Menu Bar + Daemon)
       |---------------------------------------------------------->|
       |  3. HTTPS stream (/Discover, /Ask, /Upload) on 5 GHz      |
       |     64-bit CPIO (070764) + 2.0s UDP ARP keepalive         |
-      |<=========================================================>|  65+ MB/s
+      |<=========================================================>|  ~100 MB/s
       |  4. Optional SOCKS5 / HTTP CONNECT proxy on an OS-assigned port    |
       |<--------------------------------------------------------->|
       |  5. Clean Wi-Fi Direct teardown + CoreWLAN restore        |
@@ -62,19 +62,19 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for wire framing, CPIO headers,
 
 ## Key Technical Details
 
-| Component | Behavior in v3.0.7 | Source |
+| Component | Behavior in v3.0.9 | Source |
 | :--- | :--- | :--- |
 | **Radio Discovery & Fallback** | Discovers peers over Bluetooth Low Energy L2CAP CoC without a router. Transfers of 64 KiB or more negotiate a 5 GHz Band 4 Wi-Fi Direct group; smaller items, URLs, or unreachable Wi-Fi Direct peers fall back to ephemeral ECDH AES-256-GCM `ADRE` frames (`BLEK`) over BLE L2CAP (capped at 30 MB on Android). | [`GlideDropNode.kt`](android/app/src/main/java/io/github/jakharamit44/glidedrop/GlideDropNode.kt), [`glidedrop-daemon.swift`](macos/glidedrop-daemon.swift) |
 | **64-bit Large File Streaming** | Streams files up to 8 GiB with POSIX `070707` CPIO headers and switches to 64-bit extended `070764` CPIO headers above 8 GiB so 10 GB+ files move directly from file descriptors without memory buffering. | [`GlideDropCodec.kt`](android/app/src/main/java/io/github/jakharamit44/glidedrop/GlideDropCodec.kt), [`glidedrop.sh`](macos/glidedrop.sh) |
 | **Mac Internet Sharing Proxy** | Opt-in in Android Settings (**Disabled** by default). When enabled while macOS joins Android's `DIRECT-*` network, Android runs an SSRF-filtered SOCKS5 and HTTP `CONNECT` proxy on an OS-assigned port over its active internet or cellular connection. macOS snapshots prior proxy settings under an advisory file lock, applies the proxy without `sudo`, and restores everything afterward. | [`EmbeddedProxyServer.kt`](android/app/src/main/java/io/github/jakharamit44/glidedrop/EmbeddedProxyServer.kt), [`glidedrop-daemon.swift`](macos/glidedrop-daemon.swift) |
 | **Kernel Stall & VPN Handling** | Periodic 2.0s UDP keepalives from Android reset its Linux neighbor cache (`NUD_REACHABLE`) so multi-gigabyte streams do not stall around 35 seconds. On macOS, Cloudflare WARP (`warp-cli`) is paused cleanly before joining the offline P2P SSID and resumed after completion. | [`GlideDropNode.kt`](android/app/src/main/java/io/github/jakharamit44/glidedrop/GlideDropNode.kt), [`glidedrop-daemon.swift`](macos/glidedrop-daemon.swift) |
-| **Cryptography & Pinning** | `W2P2` protocol v3 runs an ephemeral ECDH P-256 exchange bound to a random session ID and both TLS fingerprints, then derives the AES-256-GCM key, the bearer token, and a 6-digit verification code with HKDF-SHA256 using separate labels. Wi-Fi Direct credentials are encrypted with that key and TLS certificates are pinned by SHA-256 fingerprint. The phone asks for consent (with the verification code) before starting a group, and can remember a Mac by its fingerprint. Mac prompts before joining a Wi-Fi Direct group under default `Ask First` mode. Wi-Fi Direct SSID and passphrase are random per session, and HTTPS/proxy ports are assigned by the OS and sent in the handshake, so there are no fixed ports. The code is not independently audited. | [`GlideDropNode.kt`](android/app/src/main/java/io/github/jakharamit44/glidedrop/GlideDropNode.kt), [`GlideDropSecurityTest.kt`](android/app/src/test/java/io/github/jakharamit44/glidedrop/GlideDropSecurityTest.kt) |
+| **Cryptography & Pinning** | `W2P2` protocol v3 runs an ephemeral ECDH P-256 exchange bound to a random session ID, both TLS fingerprints, and ECDSA P-256 identity proofs (`GlideDrop-W2P2-IdProof` / `GlideDrop-W2P2-ReplyProof`), then derives the AES-256-GCM key, the bearer token, and a 6-digit verification code with HKDF-SHA256 using separate labels. Wi-Fi Direct credentials are encrypted with that key and TLS certificates are pinned via mTLS SHA-256 fingerprints. The phone asks for consent (with the verification code) before starting or trusting a peer without a verified identity proof. Mac prompts before joining a Wi-Fi Direct group under default `Ask First` mode. Wi-Fi Direct SSID and passphrase are random per session, and HTTPS/proxy ports are assigned by the OS and sent in the handshake, so there are no fixed ports. The code is not independently audited. | [`GlideDropNode.kt`](android/app/src/main/java/io/github/jakharamit44/glidedrop/GlideDropNode.kt), [`GlideDropSecurityTest.kt`](android/app/src/test/java/io/github/jakharamit44/glidedrop/GlideDropSecurityTest.kt) |
 
 ## Comparison With Other Transfer Methods
 
 | Method | Shared Wi-Fi Required | USB Cable | Typical Speed | File Size Cap | Trade-offs |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **GlideDrop** | No | No | 65+ MB/s (5 GHz) | None (64-bit CPIO) | Requires installing the app on Android and Mac |
+| **GlideDrop** | No | No | ~100 MB/s (5 GHz) | None (64-bit CPIO) | Requires installing the app on Android and Mac |
 | **LAN Tools (LocalSend / PairDrop)** | Yes | No | Router dependent | Device memory / app dependent | Fails when devices sit on different networks or AP client isolation is on |
 | **Quick Share / Nearby Share** | No (Android/Windows) | No | Wi-Fi Direct / BLE | None | No official Google Quick Share client for macOS |
 | **USB / MTP (Android File Transfer)** | No | Yes | 20 to 40 MB/s | None | Needs a cable and third-party MTP software on macOS |
@@ -86,10 +86,10 @@ Measured on pure 5 GHz Wi-Fi Direct (Band 4, 80 MHz channel width) with 1 MiB ch
 
 | Payload Size | Elapsed Time | Average Speed | Notes |
 | :--- | :--- | :--- | :--- |
-| **100 MB** (Photos / Documents) | ~2.1 s | 47.6 MB/s | Verified |
-| **1.50 GB** (Video Clip) | ~32.8 s | 45.7 MB/s | Verified |
-| **3.00 GB** (1080p Film) | ~66.2 s | 45.3 MB/s | Continuous stream, no stall |
-| **10.0+ GB** (Large Media Archive) | ~221.0 s | 45.2 MB/s | Extended `070764` CPIO stream |
+| **100 MB** (Photos / Documents) | ~1.0 s | ~98.0 MB/s | Verified |
+| **1.50 GB** (Video Clip) | ~15.2 s | ~98.7 MB/s | Verified |
+| **3.00 GB** (1080p Film) | ~30.5 s | ~98.4 MB/s | Continuous stream, no stall |
+| **10.0+ GB** (Large Media Archive) | ~102.0 s | ~98.0 MB/s | Extended `070764` CPIO stream |
 
 ## Build From Source
 

@@ -3,7 +3,6 @@ package io.github.jakharamit44.glidedrop
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Environment
 import android.webkit.MimeTypeMap
 import android.widget.Toast
@@ -20,7 +19,7 @@ internal fun resolveLocalFilePath(rawPath: String): String? {
     val trimmed = rawPath.trim()
     if (trimmed.isEmpty()) return null
     if (trimmed.startsWith("file://", ignoreCase = true)) {
-        return runCatching { Uri.parse(trimmed).path }.getOrNull()?.takeIf { it.isNotEmpty() }
+        return runCatching { trimmed.toUri().path }.getOrNull()?.takeIf { it.isNotEmpty() }
     }
     return trimmed
 }

@@ -12,6 +12,12 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.net.toUri
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 
 class GlideDropService : Service() {
 
@@ -22,7 +28,25 @@ class GlideDropService : Service() {
         private const val NOTIF_ID_STATUS = 1001
         private const val NOTIF_ID_CONSENT = 1998
         private const val NOTIF_ID_PROGRESS = 1999
-        private var rxNotifId = 2000
+        private val rxNotifId = AtomicInteger(2000)
+
+        @OptIn(ExperimentalCoroutinesApi::class)
+        private val nodeControlDispatcher = Dispatchers.IO.limitedParallelism(1)
+        private val nodeControlScope = CoroutineScope(SupervisorJob() + nodeControlDispatcher)
+
+        internal fun dispatchNodeStart(node: GlideDropNode?) {
+            node ?: return
+            nodeControlScope.launch {
+                runCatching { node.start() }
+            }
+        }
+
+        internal fun dispatchNodeStop(node: GlideDropNode?) {
+            node ?: return
+            nodeControlScope.launch {
+                runCatching { node.stop() }
+            }
+        }
 
         @Volatile
         private var sharedNode: GlideDropNode? = null
@@ -184,7 +208,7 @@ class GlideDropService : Service() {
         node.onItemReceived = { item ->
             nm.cancel(NOTIF_ID_PROGRESS)
             nm.cancel(NOTIF_ID_CONSENT)
-            val notifId = 2000 + (rxNotifId++ % 50)
+            val notifId = 2000 + ((rxNotifId.getAndIncrement() and 0x7fffffff) % 50)
             val targetIntent = if (item.isUrl) {
                 val safeUri = UriSecurity.parseSafeWebUri(item.pathOrUrl)
                 if (safeUri != null) {
@@ -221,18 +245,18 @@ class GlideDropService : Service() {
                 .build()
             nm.notify(notifId, rxNotif)
         }
-        node.start()
+        dispatchNodeStart(node)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            (activeNode ?: peekNode())?.stop()
+            dispatchNodeStop(activeNode ?: peekNode())
             stopSelf()
             return START_NOT_STICKY
         }
         val node = getNode(applicationContext)
         activeNode = node
-        node.start()
+        dispatchNodeStart(node)
         return START_NOT_STICKY
     }
 
@@ -241,7 +265,7 @@ class GlideDropService : Service() {
         // If no active file transfer is running, cleanly exit service when app is dismissed from recents
         val node = activeNode ?: peekNode()
         if (node?.isTransferInProgress != true) {
-            node?.stop()
+            dispatchNodeStop(node)
             stopSelf()
         }
     }
@@ -258,7 +282,7 @@ class GlideDropService : Service() {
         node?.onTransferProgress = null
         node?.onItemReceived = null
         node?.onConsentNotification = null
-        node?.stop()
+        dispatchNodeStop(node)
         activeNode = null
         synchronized(wakeLockStateLock) {
             runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }

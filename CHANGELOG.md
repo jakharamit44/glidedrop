@@ -2,6 +2,22 @@
 
 All notable changes to GlideDrop are documented in this file.
 
+## [v3.0.9]
+### Security
+- **Android mTLS client certificate authentication (`GlideDropNode.kt`)**: Enforced `needClientAuth = true` on Android TLS 1.3 receiver/Ask listeners with a dedicated `X509ExtendedTrustManager` (`buildServerTrustManagers`) that validates peer client certificates against the session's BLE-negotiated SHA-256 fingerprint before processing HTTP requests.
+- **Cryptographic `W2P2` reply identity verification (`GlideDropNode.kt`, `glidedrop-daemon.swift`)**: Signed macOS `W2P2` replies with the persistent P-256 identity key (`sig` over `W2P2-REPLY-v3` transcript) and verified the signature on Android (`verifyIncomingW2p2ReplySignature`) against stored `mac_ecdsa_pub_` pins to prevent rogue BLE listeners from spoofing pinned peers.
+- **Targeted `pendingMacTx` binding (`GlideDropNode.kt`)**: Bound outgoing `MacTransferSession` approval (`pendingMacTx`) to the selected target peer's `bleAddress`, `peerCertSha256`, and `peerEcdsaPubB64` so concurrent BLE peers cannot hijack an outgoing send session.
+- **URL `@` userinfo authority & proxy smuggling hardening (`UriSecurity.kt`, `EmbeddedProxyServer.kt`, `glidedrop.sh`, `glidedrop-daemon.swift`)**: Rejected URLs containing userinfo (`@`) in the authority across Android and macOS before launching browsers, and hardened `EmbeddedProxyServer` against `Content-Length` / `Transfer-Encoding` header smuggling, oversized header lines, and malformed ports.
+- **BiDi & control-character sanitization (`GlideDropNode.kt`, `glidedrop.sh`, `glidedrop-daemon.swift`)**: Stripped Unicode BiDi overrides and control characters from peer display names, consent prompts, and `history.log` records across Android and macOS.
+
+### Fixed
+- **macOS PID-reuse safety & off-main-thread Android lifecycle (`glidedrop-daemon.swift`, `GlideDropService.kt`, `MainActivity.kt`)**: Verified process command lines via `ps` (`isVerifiedGlideDropPid`) before signaling PIDs stored in lockfiles, moved `GlideDropNode.start()`, `stop()`, and `refreshP2p()` off the Android main thread, and fixed Used vs. Free storage donut chart sweep angles and 48dp touch targets.
+
+## [v3.0.8]
+### Fixed
+- **5 GHz Wi-Fi Direct Single-Channel Concurrency (SCC)**: Locked Android Wi-Fi Direct Group Owner creation (`selectPreferred5GhzP2pFrequencyMhz`) to the active station's 5 GHz channel when possible and switched to `WIFI_MODE_FULL_HIGH_PERF` to avoid 5 GHz MCC radio time-slicing slowdowns.
+- **macOS OpenSSL TLS 1.3 Python runtime selection**: Updated `macos/glidedrop.sh` to prefer OpenSSL-backed Python 3 (`/opt/homebrew/bin/python3`) over LibreSSL `/usr/bin/python3` for high-throughput TLS 1.3 socket transfers, and formatted transfer ETAs in human-readable `Xh Ym` / `Xm Ys` / `Xs` across Android and macOS.
+
 ## [v3.0.7]
 ### Fixed
 - **BLE L2CAP heartbeat race condition (Android → Mac)**: Prevented macOS `BleGlideDropDaemon` from calling `cm.cancelPeripheralConnection` while an incoming L2CAP channel, W2P2 join, ask prompt, or active outgoing transfer is in progress, and gave Android's `sendOverBleL2cap` up to 1.5s extra to hand off to an active incoming heartbeat plus a `RETRYABLE_BLE_DROP` retry that preserves the 5 GHz Wi-Fi Direct group.

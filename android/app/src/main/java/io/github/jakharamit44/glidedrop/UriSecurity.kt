@@ -2,7 +2,7 @@ package io.github.jakharamit44.glidedrop
 
 import android.content.Context
 import android.net.Uri
-import android.os.Build
+import androidx.core.net.toUri
 import java.io.File
 import java.net.URI
 import java.util.Locale
@@ -26,7 +26,7 @@ object UriSecurity {
             val parsed = URI(trimmed)
             val scheme = parsed.scheme?.lowercase(Locale.US) ?: return false
             if (scheme !in ALLOWED_WEB_SCHEMES) return false
-            if (!parsed.userInfo.isNullOrEmpty()) return false
+            if (!parsed.userInfo.isNullOrEmpty() || parsed.rawAuthority?.contains('@') == true) return false
             val host = parsed.host?.trim()
             !host.isNullOrEmpty()
         } catch (_: Exception) {
@@ -37,10 +37,10 @@ object UriSecurity {
     fun parseSafeWebUri(raw: String): Uri? {
         val trimmed = raw.trim()
         if (!isSafeWebUrl(trimmed)) return null
-        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
+        val uri = runCatching { trimmed.toUri() }.getOrNull() ?: return null
         val scheme = uri.scheme?.lowercase(Locale.US) ?: return null
         if (scheme !in ALLOWED_WEB_SCHEMES) return null
-        if (!uri.userInfo.isNullOrEmpty()) return null
+        if (!uri.userInfo.isNullOrEmpty() || uri.encodedAuthority?.contains('@') == true) return null
         if (uri.host.isNullOrBlank()) return null
         return uri
     }
@@ -74,9 +74,7 @@ object UriSecurity {
             runCatching { context.cacheDir.canonicalPath }.getOrNull()?.let { forbidden += it }
             runCatching { context.codeCacheDir.canonicalPath }.getOrNull()?.let { forbidden += it }
             runCatching { context.noBackupFilesDir.canonicalPath }.getOrNull()?.let { forbidden += it }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                runCatching { context.dataDir.canonicalPath }.getOrNull()?.let { forbidden += it }
-            }
+            runCatching { context.dataDir.canonicalPath }.getOrNull()?.let { forbidden += it }
             return !isPathInsideAnyRoot(canonical, forbidden)
         }
         return false

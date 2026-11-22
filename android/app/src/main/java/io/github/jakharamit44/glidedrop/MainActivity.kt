@@ -172,18 +172,6 @@ private fun middleTruncate(text: String, maxChars: Int = 34): String {
     return text.take(keepStart) + "\u2026" + text.takeLast(keepEnd)
 }
 
-private fun categoryForFileName(name: String, isUrl: Boolean = false): String {
-    if (isUrl) return "Link"
-    return when (name.substringAfterLast('.', "").lowercase(Locale.US)) {
-        "jpg", "jpeg", "png", "webp", "heic", "heif", "gif", "bmp", "svg" -> "Image"
-        "mp4", "mkv", "mov", "avi", "webm", "m4v", "ts" -> "Video"
-        "mp3", "m4a", "flac", "wav", "aac", "ogg", "opus" -> "Audio"
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv", "json" -> "Doc"
-        "apk", "aab", "dmg", "pkg", "zip", "7z", "rar", "tar", "gz" -> "Archive"
-        else -> "File"
-    }
-}
-
 @Composable
 private fun rememberAnimatorsEnabled(): Boolean {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -346,15 +334,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        if (isFinishing && ::node.isInitialized && !node.isTransferInProgress) {
-            runCatching {
-                stopService(Intent(this, GlideDropService::class.java))
-            }
-        }
-        super.onDestroy()
-    }
-
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -411,7 +390,7 @@ class MainActivity : ComponentActivity() {
 private enum class QuickIconKind {
     SEND, RECEIVE, HISTORY, SETTINGS,
     IMAGE, VIDEO, DOC, AUDIO, LINK, FOLDER,
-    SUN, MOON, REFRESH, CHECK, CLOSE, PLUS, SEARCH, BLUETOOTH, UPLOAD, DOWNLOAD
+    SUN, MOON, REFRESH, CLOSE, PLUS, SEARCH, BLUETOOTH, UPLOAD, DOWNLOAD
 }
 
 @Composable
@@ -562,7 +541,7 @@ fun GlideDropScreen(
         node.refreshSystemReadiness()
         if (node.permissionsGranted.value) {
             runCatching { context.startForegroundService(Intent(context, GlideDropService::class.java)) }
-            node.start()
+            GlideDropService.dispatchNodeStart(node)
         }
     }
 
@@ -579,14 +558,11 @@ fun GlideDropScreen(
         if (stagedItems.isEmpty() || transferProgress != null) return
         val activePeer = peers.firstOrNull { it.id == selectedPeerId }
             ?: peers.firstOrNull()
-            ?: GlideDropPeer(
-                id = "ble-mac",
-                name = "Nearby Mac",
-                host = "ble://mac",
-                port = 0,
-                rssi = -55,
-                transport = "BLE + 5GHz P2P"
-            )
+        if (activePeer == null) {
+            node.refreshP2p()
+            Toast.makeText(appContext, "No nearby device discovered yet — wait or tap Rescan", Toast.LENGTH_LONG).show()
+            return
+        }
         val snapshot = stagedItems.toList()
         val uriItemIds = snapshot.filter { it.uri != null }.map { it.id }.toSet()
         val textItemIds = snapshot.filter { it.textOrUrl != null }.map { it.id }.toSet()
@@ -666,20 +642,31 @@ fun GlideDropScreen(
                             modifier = Modifier.padding(12.dp).fillMaxWidth()
                         )
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = rememberPeerChecked,
-                            onCheckedChange = {
-                                rememberPeerChecked = it
-                                ask.rememberPeer?.set(it)
-                            },
-                            colors = CheckboxDefaults.colors(
-                                checkedColor = c.bgActionPrimary,
-                                uncheckedColor = c.textSecondary,
-                                checkmarkColor = c.textOnAction
+                    if (ask.rememberPeer != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(role = Role.Checkbox) {
+                                    val next = !rememberPeerChecked
+                                    rememberPeerChecked = next
+                                    ask.rememberPeer.set(next)
+                                }
+                        ) {
+                            Checkbox(
+                                checked = rememberPeerChecked,
+                                onCheckedChange = null,
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = c.bgActionPrimary,
+                                    uncheckedColor = c.textSecondary,
+                                    checkmarkColor = c.textOnAction
+                                )
                             )
-                        )
-                        Text("Always allow this Mac", color = c.textPrimary, fontSize = 14.sp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Always allow this Mac", color = c.textPrimary, fontSize = 14.sp)
+                        }
                     }
                 }
             },
@@ -1052,8 +1039,15 @@ fun GlideDropScreen(
                         }
                     },
                     onOpenHistoryItem = { item ->
-                        if (item.isUrl) onOpenUrl(item.pathOrUrl)
-                        else openFileWithProviderAsync(appScope, context, item.pathOrUrl, onOpenDownloads)
+                        if (item.isUrl && canOpenOrShareHistoryItem(item)) {
+                            onOpenUrl(item.pathOrUrl)
+                        } else if (canOpenOrShareHistoryItem(item)) {
+                            openFileWithProviderAsync(appScope, context, item.pathOrUrl, onOpenDownloads)
+                        } else {
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            cm?.setPrimaryClip(ClipData.newPlainText("GlideDrop", item.title))
+                            Toast.makeText(context, "Copied: ${item.title}", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onViewAllReceived = {
                         historyFilter = 1
@@ -1107,12 +1101,12 @@ fun GlideDropScreen(
                             node.refreshSystemReadiness()
                             if (node.permissionsGranted.value) {
                                 runCatching { context.startForegroundService(Intent(context, GlideDropService::class.java)) }
-                                node.start()
+                                GlideDropService.dispatchNodeStart(node)
                             } else {
                                 permLauncher.launch(requiredPermissions)
                             }
                         } else {
-                            node.stop()
+                            GlideDropService.dispatchNodeStop(node)
                             context.stopService(Intent(context, GlideDropService::class.java))
                         }
                     },
@@ -1199,7 +1193,9 @@ private fun QuickShareTopBar(
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.clickable(onClick = onRenameClick)
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clickable(role = Role.Button, onClick = onRenameClick)
                     ) {
                         Box(
                             modifier = Modifier
@@ -1223,7 +1219,7 @@ private fun QuickShareTopBar(
                     shape = CircleShape,
                     border = BorderStroke(1.dp, c.borderSubtle),
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(48.dp)
                         .pressableScale(
                             contentDesc = if (isDark) "Switch to light theme" else "Switch to dark theme",
                             onClick = onToggleTheme
@@ -1244,7 +1240,7 @@ private fun QuickShareTopBar(
                     shape = CircleShape,
                     border = BorderStroke(1.dp, c.borderSubtle),
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(48.dp)
                         .pressableScale(
                             contentDesc = "Rescan nearby devices",
                             onClick = onRescanClick
@@ -1352,18 +1348,24 @@ private fun LiveConnectionBridgeCard(
                         maxLines = 1
                     )
                 }
-                Surface(
-                    color = c.bgNeutralSubtle,
-                    shape = CircleShape,
+                Box(
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(48.dp)
+                        .clip(CircleShape)
                         .pressableScale(
                             contentDesc = "Cancel active transfer",
                             onClick = onCancel
-                        )
+                        ),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        QuickVectorIcon(kind = QuickIconKind.CLOSE, tint = c.textSecondary, size = 14.dp)
+                    Surface(
+                        color = c.bgNeutralSubtle,
+                        shape = CircleShape,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            QuickVectorIcon(kind = QuickIconKind.CLOSE, tint = c.textSecondary, size = 14.dp)
+                        }
                     }
                 }
             }
@@ -1892,21 +1894,30 @@ private fun SendHomeTab(
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 15.sp
                             )
-                            Text(
-                                text = "View all",
-                                color = c.textAccent,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                modifier = Modifier.clickable(onClick = onSwitchToHistory)
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable(role = Role.Button, onClick = onSwitchToHistory)
+                                    .padding(horizontal = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "View all",
+                                    color = c.textAccent,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                         recentSent.forEach { sent ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 48.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .clickable { onOpenRecentSent(sent) }
-                                    .padding(vertical = 4.dp, horizontal = 2.dp),
+                                    .clickable(role = Role.Button) { onOpenRecentSent(sent) }
+                                    .padding(vertical = 6.dp, horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
@@ -2000,33 +2011,45 @@ private fun SelectedFilesStagingCard(
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Surface(
-                        color = c.bgAccentSubtle,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.pressableScale(onClick = onAddMore)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .pressableScale(onClick = onAddMore),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        Surface(
+                            color = c.bgAccentSubtle,
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            QuickVectorIcon(kind = QuickIconKind.PLUS, tint = c.textAccent, size = 13.dp)
-                            Text("Add", color = c.textAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                QuickVectorIcon(kind = QuickIconKind.PLUS, tint = c.textAccent, size = 13.dp)
+                                Text("Add", color = c.textAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
                         }
                     }
-                    Surface(
-                        color = c.bgNeutralSubtle,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.pressableScale(onClick = onClearAll)
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .pressableScale(onClick = onClearAll),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = "Clear",
-                            color = c.textSecondary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
-                        )
+                        Surface(
+                            color = c.bgNeutralSubtle,
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                text = "Clear",
+                                color = c.textSecondary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -2100,9 +2123,10 @@ private fun SelectedFilesStagingCard(
 
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
+                                    .size(48.dp)
                                     .clip(CircleShape)
-                                    .clickable { onRemoveItem(item) },
+                                    .semantics { contentDescription = "Remove ${item.name}" }
+                                    .clickable(role = Role.Button) { onRemoveItem(item) },
                                 contentAlignment = Alignment.Center
                             ) {
                                 QuickVectorIcon(kind = QuickIconKind.CLOSE, tint = c.textTertiary, size = 14.dp)
@@ -2123,12 +2147,14 @@ private fun SelectedFilesStagingCard(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                if (peers.size > 1) {
-                                    val idx = peers.indexOfFirst { it.id == activePeer.id }
-                                    val next = peers[(idx + 1) % peers.size]
-                                    onSelectPeer(next.id)
-                                }
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clickable(
+                                enabled = peers.size > 1,
+                                role = Role.Button
+                            ) {
+                                val idx = peers.indexOfFirst { it.id == activePeer.id }
+                                val next = peers[(idx + 1) % peers.size]
+                                onSelectPeer(next.id)
                             }
                             .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -2172,13 +2198,21 @@ private fun SelectedFilesStagingCard(
                             fontSize = 12.sp,
                             modifier = Modifier.weight(1f)
                         )
-                        Text(
-                            text = "Rescan",
-                            color = c.textAccent,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.clickable(onClick = onRescan)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(role = Role.Button, onClick = onRescan)
+                                .padding(horizontal = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Rescan",
+                                color = c.textAccent,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }
@@ -2295,7 +2329,10 @@ private fun StorageOverviewCard(storageState: StorageState) {
             return
         }
     }
-    val usedFraction = (storage.usedBytes.toFloat() / storage.totalBytes.coerceAtLeast(1L).toFloat()).coerceIn(0.04f, 0.96f)
+    val rawUsedRatio = (storage.usedBytes.toFloat() / storage.totalBytes.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+    val usedPct = (rawUsedRatio * 100f).toInt().coerceIn(0, 100)
+    val freePct = (100 - usedPct).coerceIn(0, 100)
+    val usedGb = storage.usedBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
     val freeGb = storage.freeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
     val totalGb = storage.totalBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
 
@@ -2312,12 +2349,13 @@ private fun StorageOverviewCard(storageState: StorageState) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            // Segmented Storage Donut Ring (Mockup 1 Center)
+            // Honest Used vs Free Storage Donut Ring
             Box(
                 modifier = Modifier.size(104.dp),
                 contentAlignment = Alignment.Center
             ) {
                 val trackColor = c.surfaceSunken
+                val usedColor = c.bgActionPrimary
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val strokeW = 11.dp.toPx()
                     val inset = strokeW / 2f + 2f
@@ -2331,37 +2369,17 @@ private fun StorageOverviewCard(storageState: StorageState) {
                         size = arcSize,
                         style = Stroke(width = strokeW, cap = StrokeCap.Round)
                     )
-                    val totalSweep = usedFraction * 330f
-                    val seg1 = totalSweep * 0.48f
-                    val seg2 = totalSweep * 0.30f
-                    val seg3 = totalSweep * 0.22f
-                    drawArc(
-                        color = Color(0xFF5360F5),
-                        startAngle = -90f,
-                        sweepAngle = seg1,
-                        useCenter = false,
-                        topLeft = Offset(inset, inset),
-                        size = arcSize,
-                        style = Stroke(width = strokeW, cap = StrokeCap.Butt)
-                    )
-                    drawArc(
-                        color = Color(0xFFEC4899),
-                        startAngle = -90f + seg1,
-                        sweepAngle = seg2,
-                        useCenter = false,
-                        topLeft = Offset(inset, inset),
-                        size = arcSize,
-                        style = Stroke(width = strokeW, cap = StrokeCap.Butt)
-                    )
-                    drawArc(
-                        color = Color(0xFF16A34A),
-                        startAngle = -90f + seg1 + seg2,
-                        sweepAngle = seg3,
-                        useCenter = false,
-                        topLeft = Offset(inset, inset),
-                        size = arcSize,
-                        style = Stroke(width = strokeW, cap = StrokeCap.Butt)
-                    )
+                    if (rawUsedRatio > 0f) {
+                        drawArc(
+                            color = usedColor,
+                            startAngle = -90f,
+                            sweepAngle = rawUsedRatio * 360f,
+                            useCenter = false,
+                            topLeft = Offset(inset, inset),
+                            size = arcSize,
+                            style = Stroke(width = strokeW, cap = StrokeCap.Round)
+                        )
+                    }
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
@@ -2396,9 +2414,14 @@ private fun StorageOverviewCard(storageState: StorageState) {
                     style = TextStyle(fontFeatureSettings = "tnum")
                 )
                 Spacer(modifier = Modifier.height(2.dp))
-                StorageLegendDot(color = Color(0xFF5360F5), label = "Media & Videos")
-                StorageLegendDot(color = Color(0xFFEC4899), label = "Photos & Audio")
-                StorageLegendDot(color = Color(0xFF16A34A), label = "Documents & Apps")
+                StorageLegendDot(
+                    color = c.bgActionPrimary,
+                    label = String.format(Locale.US, "Used · %.1f GB (%d%%)", usedGb, usedPct)
+                )
+                StorageLegendDot(
+                    color = c.surfaceSunken,
+                    label = String.format(Locale.US, "Free · %.1f GB (%d%%)", freeGb, freePct)
+                )
             }
         }
     }
@@ -2750,16 +2773,25 @@ private fun ReceiveRadarTab(
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
                     )
-                    Text(
-                        text = "View all",
-                        color = c.textAccent,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.clickable(onClick = onViewAllReceived)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable(role = Role.Button, onClick = onViewAllReceived)
+                            .padding(horizontal = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "View all",
+                            color = c.textAccent,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             }
             itemsIndexed(recentReceived, key = { idx, rx -> "$idx-${rx.timestampMs}-${rx.title}" }) { _, rx ->
+                val canOpen = remember(rx) { canOpenOrShareHistoryItem(rx) }
                 Surface(
                     color = c.surfaceRaised,
                     shape = RoundedCornerShape(14.dp),
@@ -2801,7 +2833,7 @@ private fun ReceiveRadarTab(
                             )
                         }
                         Text(
-                            text = "Open",
+                            text = if (canOpen) "Open" else "Copy",
                             color = c.textAccent,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold
@@ -2865,9 +2897,10 @@ private fun TransfersHistoryScreen(
                 if (query.isNotEmpty()) {
                     Box(
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
-                            .clickable { onQueryChange("") },
+                            .semantics { contentDescription = "Clear search" }
+                            .clickable(role = Role.Button) { onQueryChange("") },
                         contentAlignment = Alignment.Center
                     ) {
                         QuickVectorIcon(kind = QuickIconKind.CLOSE, tint = c.iconSubtle, size = 13.dp)
@@ -2890,13 +2923,21 @@ private fun TransfersHistoryScreen(
                 FilterChipPill("Sent", filter == 2) { onFilterChange(2) }
             }
             if (items.isNotEmpty()) {
-                Text(
-                    text = "Clear",
-                    color = c.textDanger,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.clickable { onClearAll(filter) }
-                )
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(role = Role.Button) { onClearAll(filter) }
+                        .padding(horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Clear",
+                        color = c.textDanger,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
         }
 
@@ -3356,15 +3397,25 @@ private fun SettingsScreenTab(
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text("Activity Log", color = c.textSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                    Text(
-                                        text = "Clear",
-                                        color = c.textAccent,
-                                        fontSize = 11.sp,
-                                        modifier = Modifier.clickable(onClick = onClearLogs)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable(role = Role.Button, onClick = onClearLogs)
+                                            .padding(horizontal = 8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "Clear",
+                                            color = c.textAccent,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
                                 }
                                 if (logs.isEmpty()) {
                                     Text("No events logged yet.", color = c.textTertiary, fontSize = 11.sp)
@@ -3399,8 +3450,8 @@ private fun SettingsScreenTab(
                         @Suppress("DEPRECATION")
                         context.packageManager.getPackageInfo(context.packageName, 0)
                     }
-                    info.versionName?.takeIf { it.isNotBlank() } ?: "3.0.7"
-                }.getOrDefault("3.0.7")
+                    info.versionName?.takeIf { it.isNotBlank() } ?: "3.0.9"
+                }.getOrDefault("3.0.9")
             }
             Surface(
                 color = c.surfaceRaised,
@@ -3462,11 +3513,13 @@ private fun ThemeOptionButton(
         shape = RoundedCornerShape(12.dp),
         border = BorderStroke(1.dp, if (selected) c.bgActionPrimary else c.borderSubtle),
         modifier = modifier
-            .height(42.dp)
+            .defaultMinSize(minHeight = 48.dp)
             .pressableScale(onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
@@ -3500,7 +3553,9 @@ private fun FilterChipPill(
         color = if (selected) c.bgActionPrimary else c.surfaceRaised,
         shape = RoundedCornerShape(10.dp),
         border = BorderStroke(1.dp, if (selected) c.bgActionPrimary else c.borderSubtle),
-        modifier = modifier.pressableScale(onClick = onClick)
+        modifier = modifier
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .pressableScale(onClick = onClick)
     ) {
         Box(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
@@ -3743,33 +3798,14 @@ private fun QuickVectorIcon(
     size: Dp,
     contentDesc: String? = null
 ) {
-    val iconDesc = contentDesc ?: when (kind) {
-        QuickIconKind.SEND -> "Send"
-        QuickIconKind.RECEIVE -> "Receive"
-        QuickIconKind.HISTORY -> "History"
-        QuickIconKind.SETTINGS -> "Settings"
-        QuickIconKind.IMAGE -> "Image"
-        QuickIconKind.VIDEO -> "Video"
-        QuickIconKind.DOC -> "Document"
-        QuickIconKind.AUDIO -> "Audio"
-        QuickIconKind.LINK -> "Link"
-        QuickIconKind.FOLDER -> "Files"
-        QuickIconKind.SUN -> "Light mode"
-        QuickIconKind.MOON -> "Dark mode"
-        QuickIconKind.REFRESH -> "Refresh"
-        QuickIconKind.CHECK -> "Completed"
-        QuickIconKind.CLOSE -> "Close"
-        QuickIconKind.PLUS -> "Add"
-        QuickIconKind.SEARCH -> "Search"
-        QuickIconKind.BLUETOOTH -> "Bluetooth"
-        QuickIconKind.UPLOAD -> "Upload"
-        QuickIconKind.DOWNLOAD -> "Download"
-    }
-    Canvas(
-        modifier = Modifier
+    val iconModifier = if (contentDesc != null) {
+        Modifier
             .size(size)
-            .semantics { contentDescription = iconDesc }
-    ) {
+            .semantics { contentDescription = contentDesc }
+    } else {
+        Modifier.size(size)
+    }
+    Canvas(modifier = iconModifier) {
         val w = this.size.width
         val h = this.size.height
         val sw = (w * 0.095f).coerceAtLeast(1.6.dp.toPx())
@@ -3887,14 +3923,6 @@ private fun QuickVectorIcon(
             }
             QuickIconKind.REFRESH -> {
                 drawArc(tint, startAngle = -35f, sweepAngle = 290f, useCenter = false, topLeft = Offset(w * 0.18f, h * 0.18f), size = Size(w * 0.64f, h * 0.64f), style = stroke)
-            }
-            QuickIconKind.CHECK -> {
-                val p = Path().apply {
-                    moveTo(w * 0.2f, h * 0.52f)
-                    lineTo(w * 0.42f, h * 0.74f)
-                    lineTo(w * 0.82f, h * 0.28f)
-                }
-                drawPath(p, color = tint, style = stroke)
             }
             QuickIconKind.CLOSE -> {
                 drawLine(tint, Offset(w * 0.24f, h * 0.24f), Offset(w * 0.76f, h * 0.76f), strokeWidth = sw, cap = StrokeCap.Round)

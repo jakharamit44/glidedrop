@@ -1,7 +1,7 @@
 [versions]
-androidGradlePlugin = "9.5.1"
+androidGradlePlugin = "9.5.2"
 androidxCore = "1.19.1"
-androidxLifecycle = "2.11.0"
+androidxLifecycle = "2.11.1"
 androidxActivity = "1.13.0"
 androidxComposeBom = "2026.09.00"
 coroutines = "1.11.0"

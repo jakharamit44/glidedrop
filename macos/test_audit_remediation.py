@@ -129,6 +129,92 @@ class AuditRemediationPhase2Tests(unittest.TestCase):
         self.assertEqual(out, "Fallback OK")
         self.assertEqual(len(calls), 2)
 
+    def test_write_sidecar_preserves_unrelated_existing_claude_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dropped = root / "report.txt"
+            dropped.write_text("Quarterly summary", encoding="utf-8")
+            unrelated = root / "report.txt.claude.md"
+            unrelated.write_text("# My personal notes\nDo not clobber\n", encoding="utf-8")
+
+            with mock.patch.object(claude_processor, "is_claude_enabled", return_value=True), \
+                 mock.patch.object(claude_processor, "get_api_key", return_value=None), \
+                 mock.patch.object(claude_processor, "query_ollama_local", return_value=None):
+                saved = claude_processor.process_dropped_file(dropped, output_dir=root)
+
+            self.assertIsNotNone(saved)
+            self.assertNotEqual(saved, unrelated)
+            self.assertEqual(saved.name, "report.txt_1.claude.md")
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "# My personal notes\nDo not clobber\n")
+            self.assertIn(claude_processor.GLIDEDROP_SIDECAR_MARKER, saved.read_text(encoding="utf-8"))
+
+            # Subsequent drop on a GlideDrop-owned sidecar safely refreshes that owned sidecar
+            refreshed = claude_processor.write_sidecar(saved, f"# Local Analysis: report.txt\nUpdated\n{claude_processor.GLIDEDROP_SIDECAR_MARKER}\n")
+            self.assertEqual(refreshed, saved)
+            self.assertIn("Updated", saved.read_text(encoding="utf-8"))
+
+    def test_glidedrop_sh_framing_url_item_bounds_and_lifecycle_hardening(self):
+        import ast
+        import io
+        import re
+        import urllib.parse
+
+        script_path = Path(__file__).resolve().parent / "glidedrop.sh"
+        script_text = script_path.read_text(encoding="utf-8")
+        py_src = script_text.split("<< 'PYEOF' &\n")[1].split("\nPYEOF", 1)[0]
+        tree = ast.parse(py_src)
+        nodes = [
+            n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+            or (isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant))
+        ]
+        ns = {"re": re, "sys": __import__("sys"), "io": io}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(script_path), "exec"), ns)
+        parse_head = ns["parse_http_request_head"]
+        HttpFramingError = ns["HttpFramingError"]
+
+        # Duplicate TotalBytes must fail with 400 Bad Request
+        with self.assertRaises(HttpFramingError) as ctx_tb:
+            parse_head(io.BytesIO(b"POST /Upload HTTP/1.1\r\nTotalBytes: 10\r\nTotalBytes: 20\r\n\r\n"))
+        self.assertEqual(ctx_tb.exception.status_code, 400)
+
+        # Duplicate Transfer-Encoding must fail with 400 Bad Request
+        with self.assertRaises(HttpFramingError) as ctx_te:
+            parse_head(io.BytesIO(b"POST /Upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n"))
+        self.assertEqual(ctx_te.exception.status_code, 400)
+
+        # Non-chunked Transfer-Encoding must fail with 400 Bad Request
+        with self.assertRaises(HttpFramingError) as ctx_te2:
+            parse_head(io.BytesIO(b"POST /Upload HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"))
+        self.assertEqual(ctx_te2.exception.status_code, 400)
+
+        # @ userinfo URLs rejected while path-@ URLs accepted
+        url_regex = r"https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+"
+        def _is_safe_url(candidate: str) -> bool:
+            parsed = urllib.parse.urlsplit(candidate)
+            return (
+                parsed.scheme in ("http", "https")
+                and bool(parsed.hostname)
+                and parsed.username is None
+                and parsed.password is None
+                and "@" not in (parsed.netloc or "")
+                and bool(re.fullmatch(url_regex, candidate))
+            )
+
+        for bad_url in ("https://user:pass@evil.com/x", "https://trusted.com@evil.com/", "https://@evil.com/"):
+            self.assertFalse(_is_safe_url(bad_url), f"Must reject URL with userinfo: {bad_url}")
+        for good_url in ("https://youtube.com/@mkbhd", "https://mastodon.social/@user/123"):
+            self.assertTrue(_is_safe_url(good_url), f"Must allow path-@ URL: {good_url}")
+        self.assertIn(url_regex, script_text)
+
+        # Source invariants for /Ask items cap, mDNS cleanup, PID verification, fallback Info.plist, and single-instance UI
+        self.assertIn("len(items) > 128", script_text)
+        self.assertIn("pid_matches_file", script_text)
+        self.assertIn("atexit.register(_cleanup_awdl_mdns)", script_text)
+        self.assertIn("NSLocationWhenInUseUsageDescription", script_text)
+        self.assertIn('|| echo "3.0.9"', script_text)
+        self.assertIn("SKIP_BLE_RESTART=1 start_daemons", script_text)
+
 
 if __name__ == "__main__":
     unittest.main()

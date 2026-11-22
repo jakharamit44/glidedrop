@@ -3,4 +3,3 @@
 -keep public class io.github.jakharamit44.glidedrop.GlideDropService { *; }
 -keep class io.github.jakharamit44.glidedrop.GlideDropViewModel { *; }
 -keepattributes SourceFile,LineNumberTable
--dontwarn org.bouncycastle.**

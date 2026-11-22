@@ -1048,6 +1048,59 @@ class EmbeddedProxyServerTest {
     }
 
     @Test
+    fun testRejectsBareLfDuplicateHostAndNonChunkedOrDuplicateTransferEncoding() {
+        assertTrue(EmbeddedProxyServer.hasInvalidHttpHeaderSyntax("GET / HTTP/1.1\r\nHost: example.com\nX-Smuggled: 1\r\n\r\n"))
+        assertTrue(EmbeddedProxyServer.hasInvalidHttpHeaderSyntax("GET / HTTP/1.1\nHost: example.com\r\n\r\n"))
+        assertTrue(EmbeddedProxyServer.hasConflictingFramingHeaders("GET / HTTP/1.1\r\nHost: a.test\r\nHost: b.test\r\n\r\n"))
+        assertTrue(EmbeddedProxyServer.hasConflictingFramingHeaders("POST / HTTP/1.1\r\nHost: a.test\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n"))
+        assertTrue(EmbeddedProxyServer.hasConflictingFramingHeaders("POST / HTTP/1.1\r\nHost: a.test\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"))
+
+        val upstreamTouched = CountDownLatch(1)
+        val mockServer = ServerSocket(0, 5, InetAddress.getByName("127.0.0.1"))
+        val mockPort = mockServer.localPort
+        Thread {
+            while (!mockServer.isClosed) {
+                try {
+                    val s = mockServer.accept()
+                    upstreamTouched.countDown()
+                    s.close()
+                } catch (_: Exception) {
+                    break
+                }
+            }
+        }.apply { isDaemon = true }.start()
+
+        val proxy = newRelayTestProxy(mockPort)
+        assertTrue(proxy.start())
+        try {
+            assertEquals(
+                Triple("", -1, ""),
+                proxy.parseForwardHttpTarget("/path", "GET /path HTTP/1.1\r\nHost: a.test\r\nHost: b.test\r\n\r\n")
+            )
+            val badRequests = listOf(
+                "GET http://relay.example.test:$mockPort/ HTTP/1.1\nHost: relay.example.test:$mockPort\r\n\r\n",
+                "GET http://relay.example.test:$mockPort/ HTTP/1.1\r\nHost: relay.example.test:$mockPort\r\nHost: evil.example.test\r\n\r\n",
+                "POST http://relay.example.test:$mockPort/ HTTP/1.1\r\nHost: relay.example.test:$mockPort\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                "POST http://relay.example.test:$mockPort/ HTTP/1.1\r\nHost: relay.example.test:$mockPort\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"
+            )
+            for (bad in badRequests) {
+                Socket("127.0.0.1", proxy.actualPort).use { client ->
+                    val out = client.getOutputStream()
+                    val inp = client.getInputStream()
+                    out.write(bad.toByteArray(StandardCharsets.US_ASCII))
+                    out.flush()
+                    val status = readLine(inp).orEmpty()
+                    assertTrue("Expected 400 Bad Request for malformed framing, got: $status", status.contains("400"))
+                }
+            }
+            assertFalse("Rejected malformed requests must never reach upstream", upstreamTouched.await(250, TimeUnit.MILLISECONDS))
+        } finally {
+            proxy.stop()
+            mockServer.close()
+        }
+    }
+
+    @Test
     fun testExpandedSsrfAndHostnameBlocks() {
         val blockedTargets = listOf(
             "100.64.0.1",         // CGNAT RFC 6598

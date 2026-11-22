@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "3.0.7")"
+VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "3.0.9")"
 RELEASE_DIR="$ROOT_DIR/release"
 ALLOW_DEBUG=0
 DMG_TMP=""

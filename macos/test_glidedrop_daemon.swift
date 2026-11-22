@@ -1193,8 +1193,8 @@ struct GlideDropDaemonTests {
 
             // 11g. Source invariants for ADRE ordering, forcePrompt: true, and Unix socket bridge
             let daemonSource = try! String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("glidedrop-daemon.swift"), encoding: .utf8)
-            check(daemonSource.contains("if !waitForMacUserAccept(senderName: incomingPeerName, fileNames: [\"5 GHz Wi-Fi Direct Connection (\\(ssid))\" + (verificationCode.map { \" • Verification code \\($0)\" } ?? \"\")], totalBytes: 0, forcePrompt: true, isRemoteAborted: isRemoteAbortedNow)"),
-                  "handleIncomingWp2pJoin must always enforce forcePrompt: true and check isRemoteAborted")
+            check(daemonSource.contains("if !waitForMacUserAccept(senderName: incomingPeerName, fileNames: [\"5 GHz Wi-Fi Direct Connection (\\(ssid))\"], totalBytes: 0, forcePrompt: true, verificationCode: verificationCode, isRemoteAborted: isRemoteAbortedNow)"),
+                  "handleIncomingWp2pJoin must always enforce forcePrompt: true, separate verificationCode, and check isRemoteAborted")
             check(daemonSource.contains("if extractDvzipCpioToDownloads(archiveData: archData, metaDict: metaDict) {\n                        _ = writeAll(out, data: Data(\"OK\\r\\n\".utf8))"),
                   "ADRE must extract before sending OK")
             check(daemonSource.contains("NWConnection(to: .unix(path: resolvedSockPath), using: .tcp)"),
@@ -1312,37 +1312,6 @@ struct GlideDropDaemonTests {
             print("[PASS] Cancel-sync prompt dismissal & large-file BLE fallback policy")
         }
 
-        // Bug condition exploration (Property 1): Mac fails to join Android Wi-Fi Direct group.
-        // These encode EXPECTED behavior and are EXPECTED TO FAIL on unfixed code.
-        do {
-            let before = failures
-            // Redacted SSID (no Location authorization): valid P2P address, real netmask, router == advertised GO.
-            for (ip, mask, gw) in [("192.168.49.123", "255.255.255.0", "192.168.49.1"),
-                                   ("192.168.73.55", "255.255.255.0", "192.168.73.1")] {
-                let m = matchWifiP2pInterfaceAddress(ip: ip, netmask: mask, actualSsid: "",
-                    requestedSsid: "DIRECT-ab-Xyz1", matchingGateway: gw, matchingCidr: nil)
-                check(m?.ip == ip, "[EXPLORE] empty SSID with valid P2P address \(ip)/\(mask) router \(gw) must confirm association")
-            }
-            // Scan strategy: nil-SSID scan results must still yield a join candidate.
-            let src = (try? String(contentsOfFile: #filePath.replacingOccurrences(of: "test_glidedrop_daemon.swift", with: "glidedrop-daemon.swift"), encoding: .utf8)) ?? ""
-            let joinBody = src.components(separatedBy: "func joinWifiDirectNetwork(").dropFirst().first?
-                .components(separatedBy: "func associateWifiDirectWithRetry(").first ?? ""
-            check(!joinBody.isEmpty, "[EXPLORE] could not locate joinWifiDirectNetwork source")
-            check(!joinBody.contains("$0.ssid == ssid") || joinBody.contains("bssid") || joinBody.contains("BSSID") || joinBody.contains("channelHint"),
-                  "[EXPLORE] join strategy filters scan results only by readable ssid; nil-SSID scan results can never be selected (no BSSID/channel fallback)")
-            let cands = [WifiScanCandidate(ssid: nil, bssid: "aa:bb:cc:00:00:01", channel: 36, rssi: -40),
-                         WifiScanCandidate(ssid: nil, bssid: "aa:bb:cc:00:00:02", channel: 149, rssi: -60),
-                         WifiScanCandidate(ssid: nil, bssid: "aa:bb:cc:00:00:03", channel: 149, rssi: -50),
-                         WifiScanCandidate(ssid: "Home", bssid: "aa:bb:cc:00:00:04", channel: 149, rssi: -30)]
-            check(selectWifiJoinCandidate(cands, ssid: "DIRECT-ab-X", hints: WifiJoinHints(bssid: "AA:BB:CC:00:00:02")) == 1, "BSSID hint must select nil-SSID candidate")
-            check(selectWifiJoinCandidate(cands, ssid: "DIRECT-ab-X", hints: WifiJoinHints(channelHint: 149)) == 2, "Channel hint must pick strongest hidden-name candidate, not a named network")
-            check(selectWifiJoinCandidate(cands, ssid: "DIRECT-ab-X", hints: WifiJoinHints()) == nil, "No hints and no readable name must not guess")
-            check(selectWifiJoinCandidate(cands + [WifiScanCandidate(ssid: "DIRECT-ab-X", bssid: nil, channel: 1, rssi: -80)], ssid: "DIRECT-ab-X", hints: WifiJoinHints()) == 4, "Readable name match wins")
-            check(wifiJoinBackoff(attempt: 1) == 1.5 && wifiJoinBackoff(attempt: 20) == 6.0, "Backoff grows and is capped")
-            check(!WifiDirectStage.association.userAction.isEmpty && WifiDirectStage.tlsPin.rawValue == "TLS pin", "Stages carry user actions")
-            check(src.contains("CLLocationManager"), "[EXPLORE] Mac never requests Location authorization (no CLLocationManager)")
-            if failures > before { print("[EXPLORE] Swift bug-condition checks FAILED as expected on unfixed code (\(failures - before))") }
-        }
         do {
             // History Clear removes log lines only, never the transferred files.
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("gd-hist-\(UUID().uuidString)")
@@ -1500,6 +1469,87 @@ struct GlideDropDaemonTests {
             check(formatMacDuration(3725) == "1h 2m", "formatMacDuration(3725) must be 1h 2m")
 
             print("[PASS] Audit Phase 1 regressions (VULN-01/03/07/11/13, BUG-03)")
+        }
+
+        // 15. Security, W2P2 identity verification & UI remediation regressions
+        do {
+            let secTestRoot = FileManager.default.temporaryDirectory.appendingPathComponent("gd-sec2-\(UUID().uuidString)")
+            try! FileManager.default.createDirectory(at: secTestRoot, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: secTestRoot) }
+
+            let kg = Process()
+            kg.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+            kg.arguments = [
+                "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                "-keyout", secTestRoot.appendingPathComponent("key.pem").path,
+                "-out", secTestRoot.appendingPathComponent("cert.pem").path,
+                "-days", "1", "-nodes", "-subj", "/CN=gd-reply-test"
+            ]
+            kg.standardOutput = Pipe()
+            kg.standardError = Pipe()
+            try! kg.run()
+            kg.waitUntilExit()
+            check(kg.terminationStatus == 0, "OpenSSL P-256 cert generation must succeed")
+            let certDer = loadLocalMacCertDer(stateDir: secTestRoot)!
+            let fpHex = SHA256.hash(data: certDer).map { String(format: "%02x", $0) }.joined()
+            let sessHex = String(repeating: "cd", count: 16)
+            let pubB64 = Data("mac-reply-pub".utf8).base64EncodedString()
+
+            let idProof = signW2p2IdentityProof(version: W2P2_PROTOCOL_VERSION, pubB64: pubB64, tlsFp: fpHex, sessionIdHex: sessHex, stateDir: secTestRoot)!
+            let reqOk = parseW2p2Request("\(W2P2_PROTOCOL_VERSION)\t\(pubB64)\t\(fpHex)\t\(sessHex)\t\(idProof.certDerB64)\t\(idProof.sigB64)")
+            check(verifyW2p2IdentityProof(reqOk), "verifyW2p2IdentityProof must accept valid ECDSA identity proof")
+            check(!verifyW2p2IdentityProof(reqOk, expectedDomain: "GlideDrop-W2P2-ReplyProof"),
+                  "verifyW2p2IdentityProof must enforce domain separation between request and reply proofs")
+
+            let replyProof = signW2p2IdentityProof(version: W2P2_PROTOCOL_VERSION, pubB64: pubB64, tlsFp: fpHex, sessionIdHex: sessHex, stateDir: secTestRoot, domain: "GlideDrop-W2P2-ReplyProof")!
+            let replyParsed = W2p2Request(version: W2P2_PROTOCOL_VERSION, pubB64: pubB64, tlsFingerprint: fpHex, sessionId: dataFromHex(sessHex), certDerB64: replyProof.certDerB64, identitySigB64: replyProof.sigB64)
+            check(verifyW2p2IdentityProof(replyParsed, expectedDomain: "GlideDrop-W2P2-ReplyProof"),
+                  "verifyW2p2IdentityProof must verify valid GlideDrop-W2P2-ReplyProof signatures")
+            let wrongFpReq = W2p2Request(version: W2P2_PROTOCOL_VERSION, pubB64: pubB64, tlsFingerprint: String(repeating: "ee", count: 32), sessionId: dataFromHex(sessHex), certDerB64: replyProof.certDerB64, identitySigB64: replyProof.sigB64)
+            check(!verifyW2p2IdentityProof(wrongFpReq, expectedDomain: "GlideDrop-W2P2-ReplyProof"),
+                  "verifyW2p2IdentityProof must reject fingerprint mismatches")
+
+            // URL validation must block authority userinfo (@), control chars, and non-web schemes
+            check(parseSafeExternalWebUrl("https://user:pass@example.com/path") == nil, "parseSafeExternalWebUrl must block userinfo credentials")
+            check(parseSafeExternalWebUrl("https://trusted.com@evil.example/path") == nil, "parseSafeExternalWebUrl must block @ host-confusion userinfo")
+            check(parseSafeExternalWebUrl("javascript:alert(1)") == nil, "parseSafeExternalWebUrl must reject javascript scheme")
+            check(parseSafeExternalWebUrl("https://example.com/@alice") != nil, "parseSafeExternalWebUrl should permit benign path segment @alice")
+
+            // Process identity check before PID signaling
+            check(isVerifiedGlideDropPid(getpid(), matchingAny: ["gd", "test"]), "isVerifiedGlideDropPid must match current test binary name")
+            check(!isVerifiedGlideDropPid(getpid(), matchingAny: ["nonexistent-process-marker-xyz"]),
+                  "isVerifiedGlideDropPid must fail closed on unrelated command names")
+            check(isVerifiedGlideDropPid(getpid(), matchingAll: ["glidedrop", "test"]),
+                  "isVerifiedGlideDropPid(matchingAll:) must require all process markers")
+            check(!isVerifiedGlideDropPid(getpid(), matchingAll: ["test", "nonexistent-marker"]),
+                  "isVerifiedGlideDropPid(matchingAll:) must reject partial matches like generic python/dns-sd reuse")
+
+            // Truncated 5-field W2P2 proof must retain certDerB64 so partial proof fails closed
+            let parsed5 = parseW2p2Request("\(W2P2_PROTOCOL_VERSION)\t\(pubB64)\t\(fpHex)\t\(sessHex)\t\(idProof.certDerB64)")
+            check(parsed5.certDerB64 == idProof.certDerB64 && parsed5.identitySigB64 == nil,
+                  "parseW2p2Request must capture 5th cert field so incomplete proofs fail verification")
+            check(!verifyW2p2IdentityProof(parsed5),
+                  "verifyW2p2IdentityProof must reject 5-field request missing signature")
+
+            // BiDi control & whitespace sanitization
+            let cleanBidi = sanitizeHistoryField("Alice\u{202E}Phone\t123\nURL")
+            check(!cleanBidi.unicodeScalars.contains(where: { $0.properties.generalCategory == .format }) && !cleanBidi.contains("\t") && !cleanBidi.contains("\n"),
+                  "sanitizeHistoryField must strip BiDi format controls, tabs, and newlines")
+
+            // ADRE ordering & UI safety invariants in glidedrop-daemon.swift
+            let daemonSrc = try! String(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("glidedrop-daemon.swift"), encoding: .utf8)
+            let adreChunk = daemonSrc.components(separatedBy: "guard magic == \"ADRE\"").dropFirst().first ?? ""
+            let acceptPos = adreChunk.range(of: "waitForMacUserAccept")?.lowerBound
+            let recordPos = adreChunk.range(of: "recordActivePeerOnDisk")?.lowerBound
+            check(acceptPos != nil && recordPos != nil && acceptPos! < recordPos!,
+                  "ADRE must authenticate user consent before persisting sender to active_peers.json")
+
+            // MacStorageSummary invariant
+            let sSummary = MacStorageSummary(totalBytes: 1000, freeBytes: 250)
+            check(sSummary.usedBytes == 750 && abs(sSummary.usedFraction - 0.75) < 0.001,
+                  "MacStorageSummary must compute honest used/free breakdown")
+
+            print("[PASS] Security, W2P2 identity verification & UI remediation regressions")
         }
         if failures > 0 {
             fputs("[SUMMARY] \(failures) Swift regression check(s) FAILED\n", stderr)

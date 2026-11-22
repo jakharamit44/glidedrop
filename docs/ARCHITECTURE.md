@@ -13,11 +13,12 @@ GlideDrop transfers files, links, and text notes directly between Android (API 3
        |       (device name is not advertised)                       |
        |     * Name exchanged after connect, inside L2CAP            |
        |                                                             |
-       |  2. Ephemeral ECDH P-256 Handshake (W2P2)                   |
+       |  2. Ephemeral ECDH P-256 Handshake (W2P2 v3)                |
        |<----------------------------------------------------------->|
        |     * W2P2 v3: pubkey + TLS fingerprint + random session ID |
+       |       + ECDSA P-256 identity proof                          |
        |     * HKDF-SHA256 -> AES key, bearer token, 6-digit code    |
-       |     * Phone consent dialog shows code; optional per-Mac     |
+       |     * Phone consent dialog shows code; verified per-Mac     |
        |       fingerprint trust                                     |
        |     * Encrypted random SSID/passphrase + OS-assigned ports  |
        |                                                             |
@@ -28,11 +29,11 @@ GlideDrop transfers files, links, and text notes directly between Android (API 3
        |     * Mac receives dynamic OS P2P DHCP IP (active CIDR)     |
        |     * Optional: Mac points SOCKS5/HTTP proxy to exchanged port|
        |                                                             |
-       |  4. Pinned TLS HTTPS Stream (OS-assigned ports) (/Discover, /Ask, /Upload)      |
+       |  4. Mutually Pinned TLS HTTPS Stream (/Discover, /Ask, /Upload) |
        |     * POST /Discover (bplist00 capability negotiation)      |
        |     * POST /Ask (bplist00 file/URL metadata & approval)     |
        |     * POST /Upload (DVZip/CPIO chunked archive stream)      |
-       |<===========================================================>| (65+ MB/s)
+       |<===========================================================>| (~100 MB/s)
        |     * 2.0s UDP ARP keepalive over active P2P subnet         |
        |                                                             |
        |  5. Clean Teardown & Network Restore                        |
@@ -72,14 +73,14 @@ GlideDrop transfers files, links, and text notes directly between Android (API 3
 
 ### C. Kernel Neighbor Cache Keepalive
 
-Unidirectional HTTP uploads at 65+ MB/s can starve reverse ARP traffic, causing the Linux neighbor table on Android to mark the peer `STALE` after roughly 30 seconds and drop packets. During active 5 GHz sessions, `GlideDropNode` emits UDP keepalive pulses every 2.0 seconds to the peer's exchanged keepalive port over the `p2p-wlan0-*` network so the neighbor entry stays in `NUD_REACHABLE` throughout multi-gigabyte transfers.
+Unidirectional HTTP uploads at ~100 MB/s can starve reverse ARP traffic, causing the Linux neighbor table on Android to mark the peer `STALE` after roughly 30 seconds and drop packets. During active 5 GHz sessions, `GlideDropNode` emits UDP keepalive pulses every 2.0 seconds to the peer's exchanged keepalive port over the `p2p-wlan0-*` network so the neighbor entry stays in `NUD_REACHABLE` throughout multi-gigabyte transfers.
 
 ### D. Embedded Dual-Protocol Internet Proxy (OS-assigned port)
 
 When macOS switches Wi-Fi to the offline `DIRECT-*` SSID, [`EmbeddedProxyServer.kt`](../android/app/src/main/java/io/github/jakharamit44/glidedrop/EmbeddedProxyServer.kt) can serve SOCKS5 (RFC 1928) and HTTP `CONNECT`/Forward traffic on an OS-assigned port, binding outbound sockets to Android's active validated internet network or cellular fallback (`ConnectivityManager`).
 
 * Only active OS-resolved Wi-Fi Direct P2P subnet clients are accepted (opt-in setting, off by default; loopback denied in production).
-* Pre- and post-DNS SSRF checks reject loopback, wildcard, RFC 1918 private LAN, link-local (`169.254.0.0/16`, `fe80::/10`), IPv6 ULA (`fc00::/7`), NAT64, `.localdomain`, and multicast destinations across all ports, while header filtering rejects `TE.CL`/`CL.CL` request smuggling (`400 Bad Request`), strips `Proxy-Authorization`, and blocks `Upgrade` smuggling.
+* Pre- and post-DNS SSRF checks reject loopback, wildcard, RFC 1918 private LAN, link-local (`169.254.0.0/16`, `fe80::/10`), IPv6 ULA (`fc00::/7`), NAT64, `.localdomain`, and multicast destinations across all ports, while header filtering rejects bare CR/LF, `TE.CL`/`CL.CL` request smuggling, duplicate `Host`, and non-`chunked` `Transfer-Encoding` headers (`400 Bad Request`), strips `Proxy-Authorization`, and blocks `Upgrade` smuggling.
 * On macOS, `glidedrop-daemon.swift` serializes snapshot and restore operations under an advisory file lock (`proxy_state.lock`) via `networksetup`, preserving existing proxy settings and bypass domains without `sudo`.
 
 ### E. macOS Wi-Fi & VPN Recovery

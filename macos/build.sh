@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "2.0.0")"
+VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "3.0.9")"
 
 echo "[+] Building GlideDrop macOS daemon (v${VERSION})..."
 mkdir -p -m 700 "$HOME/.glidedrop"

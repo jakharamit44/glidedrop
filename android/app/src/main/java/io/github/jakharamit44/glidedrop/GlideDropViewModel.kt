@@ -59,7 +59,8 @@ class GlideDropViewModel : ViewModel() {
         val appContext = context.applicationContext
         viewModelScope.launch {
             val resolved = withContext(Dispatchers.IO) {
-                toResolve.map { uri ->
+                toResolve.mapNotNull { uri ->
+                    if (!UriSecurity.isSafeShareUri(appContext, uri)) return@mapNotNull null
                     runCatching {
                         appContext.contentResolver.takePersistableUriPermission(
                             uri,
@@ -97,7 +98,7 @@ class GlideDropViewModel : ViewModel() {
     fun stageTextOrUrl(raw: String) {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return
-        val isLink = trimmed.startsWith("http://") || trimmed.startsWith("https://")
+        val isLink = UriSecurity.isSafeWebUrl(trimmed)
         val key = "text:$trimmed"
         _stagedItems.update { current ->
             if (current.any { it.id == key }) {
@@ -121,10 +122,6 @@ class GlideDropViewModel : ViewModel() {
     fun removeStagedItemIds(ids: Set<String>) {
         if (ids.isEmpty()) return
         _stagedItems.update { current -> current.filterNot { it.id in ids } }
-    }
-
-    fun removeStagedUriItems() {
-        _stagedItems.update { current -> current.filterNot { it.uri != null } }
     }
 
     fun clearStagedItems() {

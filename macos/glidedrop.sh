@@ -60,6 +60,7 @@ ensure_cert() {
     (
       umask 077
       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -pkeyopt ec_param_enc:named_curve \
         -keyout "$STATE_DIR/key.pem" -out "$STATE_DIR/cert.pem" \
         -days 3650 -nodes -subj "/CN=glidedrop" >/dev/null 2>&1
     )
@@ -84,7 +85,7 @@ ensure_ble_bin() {
         cp -f "$SCRIPT_DIR/AppIcon.icns" "$APP_RES/AppIcon.icns" 2>/dev/null || true
       fi
       chmod +x "$APP_RES/glidedrop.sh" 2>/dev/null || true
-      APP_VER="$(cat "$SCRIPT_DIR/../VERSION" 2>/dev/null || echo "3.0.7")"
+      APP_VER="$(cat "$SCRIPT_DIR/../VERSION" 2>/dev/null || echo "3.0.9")"
       cat > "$SCRIPT_DIR/GlideDrop.app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -112,6 +113,10 @@ ensure_ble_bin() {
   <true/>
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>GlideDrop uses Bluetooth LE L2CAP to discover and transfer files with Android devices.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>GlideDrop needs Location access so macOS lets it see Wi-Fi network names when joining a nearby phone's Wi-Fi Direct group and returning to your home Wi-Fi. Your location is never read or stored.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>GlideDrop needs Location access so macOS lets it see Wi-Fi network names when joining a nearby phone's Wi-Fi Direct group and returning to your home Wi-Fi. Your location is never read or stored.</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>GlideDrop requires local network access to discover nearby devices and transfer files over high-speed Wi-Fi Direct and local sockets.</string>
 </dict>
@@ -184,30 +189,44 @@ PYDEF
   fi
 }
 
-stop_http_daemons() {
-  for pf in "$PID_FILE" "$AWDL_MDNS_PID_FILE"; do
-    if [[ -f "$pf" ]]; then
+pid_matches_file() {
+  local pf="$1"
+  local regex="$2"
+  [[ -f "$pf" ]] || return 1
+  local _p
+  _p="$(cat "$pf" 2>/dev/null || true)"
+  [[ "$_p" =~ ^[0-9]+$ ]] && [[ "$_p" -gt 1 ]] || return 1
+  local _cmd
+  _cmd="$(ps -p "$_p" -o command= 2>/dev/null || true)"
+  [[ -n "$_cmd" ]] && printf '%s\n' "$_cmd" | grep -Eq "$regex"
+}
+
+kill_pid_if_matches() {
+  local pf="$1"
+  local regex="$2"
+  if [[ -f "$pf" ]]; then
+    if pid_matches_file "$pf" "$regex"; then
       local _p
       _p="$(cat "$pf" 2>/dev/null || true)"
-      if [[ -n "$_p" ]]; then
-        kill "$_p" 2>/dev/null || true
-      fi
-      rm -f "$pf"
+      kill "$_p" 2>/dev/null || true
     fi
-  done
+    rm -f "$pf"
+  fi
+}
+
+stop_http_daemons() {
+  kill_pid_if_matches "$PID_FILE" "python.*cert\\.pem|glidedrop\\.sh"
+  kill_pid_if_matches "$AWDL_MDNS_PID_FILE" "dns-sd.*_airdrop\\._tcp"
   rm -f "$STATE_DIR/mac_rx_port" "$STATE_DIR/finder_proxy_port" "$STATE_DIR/finder_proxy.sock" "$STATE_DIR/finder_proxy_sock" 2>/dev/null || true
 }
 
 stop_daemons() {
   stop_http_daemons
   local ble_pid=""
-  if [[ -f "$BLE_PID_FILE" ]]; then
+  if pid_matches_file "$BLE_PID_FILE" "glidedrop-daemon|GlideDrop"; then
     ble_pid="$(cat "$BLE_PID_FILE" 2>/dev/null || true)"
-    if [[ -n "$ble_pid" ]]; then
-      kill "$ble_pid" 2>/dev/null || true
-    fi
-    rm -f "$BLE_PID_FILE"
   fi
+  kill_pid_if_matches "$BLE_PID_FILE" "glidedrop-daemon|GlideDrop"
   pkill -x "glidedrop-daemon" 2>/dev/null || true
   pkill -x "GlideDrop" 2>/dev/null || true
   local _wait=0
@@ -247,7 +266,7 @@ start_daemons() {
 
   # Start Direct Bluetooth LE L2CAP receiver only if GlideDrop app is not already running
   if [[ "${SKIP_BLE_RESTART:-0}" != "1" ]] && ! pgrep -f "GlideDrop.app" >/dev/null 2>&1 && ! pgrep -x "GlideDrop" >/dev/null 2>&1; then
-    if [[ ! -f "$BLE_PID_FILE" ]] || ! kill -0 "$(cat "$BLE_PID_FILE")" 2>/dev/null; then
+    if ! pid_matches_file "$BLE_PID_FILE" "glidedrop-daemon|GlideDrop"; then
       if [[ -x "$BLE_BIN" ]]; then
         nohup "$BLE_BIN" daemon >"$BLE_LOG_FILE" 2>&1 < /dev/null &
         echo $! >"$BLE_PID_FILE"
@@ -602,7 +621,7 @@ def _wait_for_user_accept(sender_name: str, file_names: list, total_bytes: int, 
                 proc = subprocess.Popen([
                     "osascript",
                     "-e", "on run argv",
-                    "-e", 'tell application "System Events" to display dialog ((item 1 of argv) & " wants to share " & (item 2 of argv) & " with you.") with title "GlideDrop" buttons {"Decline", "Accept"} default button "Accept" giving up after 40',
+                    "-e", 'tell application "System Events" to display dialog ((item 1 of argv) & " wants to share " & (item 2 of argv) & " with you.") with title "GlideDrop" buttons {"Decline", "Accept"} default button "Accept" giving up after 55',
                     "-e", "end run",
                     "--",
                     str(sender_name)[:80],
@@ -627,7 +646,7 @@ def _wait_for_user_accept(sender_name: str, file_names: list, total_bytes: int, 
         threading.Thread(target=prompt_dialog, daemon=True).start()
 
         t_start = time.time()
-        while time.time() - t_start < 45.0:
+        while time.time() - t_start < 58.0:
             if _is_local_rx_cancelled():
                 print(f"[P2P-Receiver] Cancelled transfer prompt from {sender_name}")
                 return False
@@ -727,7 +746,12 @@ def parse_http_request_head(f, max_lines: int = MAX_HTTP_HEADER_LINES, max_bytes
                 raise HttpFramingError(400, "Bad Request", "Duplicate Content-Length header")
             parse_non_negative_int(val, "Content-Length")
         elif name == "totalbytes":
+            if "totalbytes" in headers:
+                raise HttpFramingError(400, "Bad Request", "Duplicate TotalBytes header")
             parse_non_negative_int(val, "TotalBytes")
+        elif name == "transfer-encoding":
+            if "transfer-encoding" in headers:
+                raise HttpFramingError(400, "Bad Request", "Duplicate Transfer-Encoding header")
         headers[name] = val
 
     if "content-length" in headers and "transfer-encoding" in headers:
@@ -1764,7 +1788,8 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                     info = {}
                 items = info.get("Items") or []
                 files = info.get("Files") or []
-                if not isinstance(items, list) or not isinstance(files, list) or len(files) > 4096:
+                if (not isinstance(items, list) or len(items) > 128
+                        or not isinstance(files, list) or len(files) > 4096):
                     send_resp(conn, 400, "Bad Request", b"", close=True)
                     break
                 approved_manifest = []
@@ -1800,7 +1825,7 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                     touch_rx_lock()
                     ask_phase = "Starting incoming stream…" if load_settings().get("autoAccept", False) else f"Waiting for approval from {current_mac_name()}…"
                     write_progress(True, "Receiving", last_label, 0, last_total, 0, 0, 0, last_count, phase=ask_phase, peer_name=last_sender, is_connecting=True)
-                    conn.settimeout(60.0)
+                    conn.settimeout(65.0)
                     if not wait_for_user_accept(last_sender, fnames if fnames else [str(x) for x in items], last_total,
                                                 conn=conn, session_token=headers.get("x-glidedrop-token", "").strip().lower(), peer_ip=peer_ip):
                         write_progress(False)
@@ -1811,9 +1836,17 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                     touch_rx_lock()
                     ask_approved = True
                     approved_token = headers.get("x-glidedrop-token", "").strip().lower()
+                    url_prompts_spawned = 0
                     for it in items:
                         if isinstance(it, str) and (it.startswith("http://") or it.startswith("https://")):
-                            if not re.fullmatch(r"https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+", it):
+                            import urllib.parse as _up
+                            parsed_it = _up.urlsplit(it)
+                            if (parsed_it.scheme not in ("http", "https")
+                                    or not parsed_it.hostname
+                                    or parsed_it.username is not None
+                                    or parsed_it.password is not None
+                                    or "@" in (parsed_it.netloc or "")
+                                    or not re.fullmatch(r"https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+", it)):
                                 print(f"[-] Dropping malformed or suspicious URL: {it}")
                                 continue
                             append_history("URL", it, len(it), "received", last_sender)
@@ -1824,17 +1857,19 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                             except Exception:
                                 pass
                             safe_notify(f"Received link (copied to clipboard): {it}", f"GlideDrop from {last_sender}")
-                            # Prompt user with an action button instead of auto-launching browser
-                            def prompt_user_url_action(target_url: str, sender_name: str):
-                                try:
-                                    subprocess.run(
-                                        build_url_prompt_osascript_argv(target_url, sender_name),
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL,
-                                    )
-                                except Exception:
-                                    pass
-                            threading.Thread(target=prompt_user_url_action, args=(it, last_sender), daemon=True).start()
+                            if url_prompts_spawned < 3:
+                                url_prompts_spawned += 1
+                                # Prompt user with an action button instead of auto-launching browser
+                                def prompt_user_url_action(target_url: str, sender_name: str):
+                                    try:
+                                        subprocess.run(
+                                            build_url_prompt_osascript_argv(target_url, sender_name),
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL,
+                                        )
+                                    except Exception:
+                                        pass
+                                threading.Thread(target=prompt_user_url_action, args=(it, last_sender), daemon=True).start()
                 resp = plistlib.dumps({
                     "ReceiverComputerName": active_peer_name if is_p2p_proxy else current_mac_name(),
                     "ReceiverModelName": "iPhone16,2" if is_p2p_proxy else "MacBookPro18,2",
@@ -2170,6 +2205,46 @@ def _is_transfer_progress_active(ttl: float = 60.0) -> bool:
         except Exception:
             return False
 
+import atexit, signal
+
+_awdl_mdns_lock = threading.Lock()
+_awdl_mdns_proc = [None]
+
+
+def _cleanup_awdl_mdns():
+    with _awdl_mdns_lock:
+        proc = _awdl_mdns_proc[0]
+        _awdl_mdns_proc[0] = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    try:
+        (STATE_DIR / "awdl-mdns.pid").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_awdl_mdns)
+
+
+def _handle_daemon_term(_signum, _frame):
+    _cleanup_awdl_mdns()
+    sys.exit(0)
+
+
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_sig, _handle_daemon_term)
+    except Exception:
+        pass
+
+
 def watch_awdl_mdns():
     pid_file = STATE_DIR / "awdl-mdns.pid"
     rx_lock = STATE_DIR / "rx_in_progress.lock"
@@ -2177,28 +2252,20 @@ def watch_awdl_mdns():
     instance_id = get_awdl_instance_id()
     cur_ip = None
     cur_port = None
-    proc = None
     while True:
         try:
+            proc = _awdl_mdns_proc[0]
             if _is_lock_active(rx_lock, 30.0) or _is_lock_active(tx_lock, 180.0) or _is_transfer_progress_active(60.0):
-                if proc and proc.poll() is None:
-                    proc.terminate()
-                proc = None
+                _cleanup_awdl_mdns()
                 cur_ip = None
                 cur_port = None
-                if pid_file.exists():
-                    pid_file.unlink(missing_ok=True)
                 time.sleep(2.0)
                 continue
             active_peers = get_active_peers(12.0)
             if not active_peers:
-                if proc and proc.poll() is None:
-                    proc.terminate()
-                proc = None
+                _cleanup_awdl_mdns()
                 cur_ip = None
                 cur_port = None
-                if pid_file.exists():
-                    pid_file.unlink(missing_ok=True)
                 time.sleep(2.0)
                 continue
             bridge_port = read_awdl_bridge_port()
@@ -2213,15 +2280,18 @@ def watch_awdl_mdns():
                     new_ip = line.split()[1].split("%")[0]
                     break
             if new_ip and (new_ip != cur_ip or bridge_port != cur_port or (proc and proc.poll() is not None)):
-                if proc and proc.poll() is None:
-                    proc.terminate()
-                safe_instance_id = re.sub(r"[^A-Za-z0-9._-]", "", str(instance_id)).lstrip("-") or "glidedrop"
-                proc = subprocess.Popen(
-                    # Required by Apple sharingd on awdl0 for Finder Share Sheet peer discovery
-                    ["dns-sd", "-i", "awdl0", "-P", safe_instance_id, "_airdrop._tcp", "local.", str(bridge_port), "glidedrop.local.", new_ip, "flags=136"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-                pid_file.write_text(str(proc.pid))
+                with _awdl_mdns_lock:
+                    old_proc = _awdl_mdns_proc[0]
+                    if old_proc and old_proc.poll() is None:
+                        old_proc.terminate()
+                    safe_instance_id = re.sub(r"[^A-Za-z0-9._-]", "", str(instance_id)).lstrip("-") or "glidedrop"
+                    proc = subprocess.Popen(
+                        # Required by Apple sharingd on awdl0 for Finder Share Sheet peer discovery
+                        ["dns-sd", "-i", "awdl0", "-P", safe_instance_id, "_airdrop._tcp", "local.", str(bridge_port), "glidedrop.local.", new_ip, "flags=136"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    _awdl_mdns_proc[0] = proc
+                    pid_file.write_text(str(proc.pid))
                 cur_ip = new_ip
                 cur_port = bridge_port
                 print(f"[AWDL-mDNS] Advertising active peer ({active_peers[0].get('name')}) on awdl0 at {cur_ip}:{bridge_port} (id={safe_instance_id}, PID {proc.pid})")
@@ -2597,7 +2667,18 @@ try:
             sys.exit(45)
         expected_fp = normalized_pin
 
+    import urllib.parse as _up
     urls = [a for a in args if a.startswith("http://") or a.startswith("https://")]
+    for _u in urls:
+        _pu = _up.urlsplit(_u)
+        if (_pu.scheme not in ("http", "https")
+                or not _pu.hostname
+                or _pu.username is not None
+                or _pu.password is not None
+                or "@" in (_pu.netloc or "")
+                or not re.fullmatch(r"https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+", _u)):
+            print(f"[-] Refusing malformed or suspicious URL: {_u}", file=sys.stderr)
+            sys.exit(45)
     file_args = [a for a in args if a not in urls]
     files = [Path(a).expanduser().resolve() for a in file_args]
     for f in files:
@@ -3008,14 +3089,28 @@ PYEOF
     fi
     ;;
   ui)
-    start_daemons
-    if [[ -f "$BLE_PID_FILE" ]]; then
-      kill "$(cat "$BLE_PID_FILE")" 2>/dev/null || true
-      rm -f "$BLE_PID_FILE"
+    SKIP_BLE_RESTART=1 start_daemons
+    if pgrep -x "GlideDrop" >/dev/null 2>&1; then
+      if pid_matches_file "$BLE_PID_FILE" "glidedrop-daemon|GlideDrop"; then
+        "$BLE_BIN" >/dev/null 2>&1 || true
+      else
+        if ! open -b io.github.jakharamit44.glidedrop.mac >/dev/null 2>&1; then
+          if [[ -d "$SCRIPT_DIR/../GlideDrop.app" ]]; then
+            open -a "$SCRIPT_DIR/../GlideDrop.app" >/dev/null 2>&1 || true
+          elif [[ -d "/Applications/GlideDrop.app" ]]; then
+            open -a "/Applications/GlideDrop.app" >/dev/null 2>&1 || true
+          fi
+        fi
+      fi
+      echo "[+] Brought existing GlideDrop macOS UI window to front."
+    elif pid_matches_file "$BLE_PID_FILE" "glidedrop-daemon|GlideDrop"; then
+      "$BLE_BIN" >/dev/null 2>&1 || true
+      echo "[+] Brought existing GlideDrop macOS UI window to front."
+    else
+      nohup "$BLE_BIN" >"$BLE_LOG_FILE" 2>&1 < /dev/null &
+      echo $! >"$BLE_PID_FILE"
+      echo "[+] Opened GlideDrop macOS UI window (PID $!)."
     fi
-    nohup "$BLE_BIN" >"$BLE_LOG_FILE" 2>&1 < /dev/null &
-    echo $! >"$BLE_PID_FILE"
-    echo "[+] Opened GlideDrop macOS UI window (PID $!)."
     ;;
   *)
     echo "Usage: $0 {on|off|status|ui|send [files_or_urls...]}"

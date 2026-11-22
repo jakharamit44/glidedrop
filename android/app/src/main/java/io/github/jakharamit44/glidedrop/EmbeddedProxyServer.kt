@@ -482,7 +482,11 @@ class EmbeddedProxyServer internal constructor(
                     if (i + 1 >= rawHeaderBlock.length || rawHeaderBlock[i + 1] != '\n') {
                         return true
                     }
-                } else if (ch != '\n' && ch != '\t' && ch.code < 0x20) {
+                } else if (ch == '\n') {
+                    if (i == 0 || rawHeaderBlock[i - 1] != '\r') {
+                        return true
+                    }
+                } else if ((ch != '\t' && ch.code < 0x20) || ch.code == 0x7F) {
                     return true
                 }
             }
@@ -490,9 +494,10 @@ class EmbeddedProxyServer internal constructor(
         }
 
         internal fun hasConflictingFramingHeaders(rawHeaderBlock: String): Boolean {
-            val allLines = rawHeaderBlock.split(Regex("\\r\\n|\\n|\\r"))
+            val allLines = rawHeaderBlock.split("\r\n")
             var contentLengthCount = 0
-            var hasTransferEncoding = false
+            var transferEncodingCount = 0
+            var hostCount = 0
             for (i in 1 until allLines.size) {
                 val line = allLines[i]
                 if (line.isEmpty()) continue
@@ -502,16 +507,28 @@ class EmbeddedProxyServer internal constructor(
                 if (rawName.any { it.isWhitespace() }) return true
                 val name = rawName.trim().lowercase(java.util.Locale.US)
                 val value = line.substring(colonIdx + 1).trim()
-                if (name == "content-length") {
-                    contentLengthCount++
-                    if (value.isEmpty() || !value.all { it in '0'..'9' }) {
-                        return true
+                when (name) {
+                    "content-length" -> {
+                        contentLengthCount++
+                        if (value.isEmpty() || !value.all { it in '0'..'9' }) {
+                            return true
+                        }
                     }
-                } else if (name == "transfer-encoding") {
-                    hasTransferEncoding = true
+                    "transfer-encoding" -> {
+                        transferEncodingCount++
+                        if (transferEncodingCount > 1 || !value.equals("chunked", ignoreCase = true)) {
+                            return true
+                        }
+                    }
+                    "host" -> {
+                        hostCount++
+                        if (hostCount > 1 || value.isEmpty()) {
+                            return true
+                        }
+                    }
                 }
             }
-            if (hasTransferEncoding && contentLengthCount > 0) return true
+            if (transferEncodingCount > 0 && contentLengthCount > 0) return true
             if (contentLengthCount > 1) return true
             return false
         }
@@ -1072,13 +1089,17 @@ class EmbeddedProxyServer internal constructor(
             return Triple(host, port, rewritten)
         }
 
-        // Relative URI — locate host from Host: header
+        // Relative URI — locate host from single Host: header
         var hostHeader = ""
+        var hostCount = 0
         for (line in fullHeaders.lineSequence()) {
             val trimmed = line.trim()
             if (trimmed.startsWith("Host:", ignoreCase = true)) {
+                hostCount++
+                if (hostCount > 1) {
+                    return Triple("", -1, "")
+                }
                 hostHeader = trimmed.substringAfter(":").trim()
-                break
             }
         }
 

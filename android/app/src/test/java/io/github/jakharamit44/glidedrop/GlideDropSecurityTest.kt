@@ -203,26 +203,30 @@ class GlideDropSecurityTest {
     }
 
     @Test
-    fun w2p2PayloadParsingHandlesVersionedAndUnversioned() {
-        // 1. Version 2 format: "\t2\t<macPubB64>\t<fingerprint>"
-        val v2Res = GlideDropNode.parseW2P2Line("\t2\tPUB_KEY_B64\tFINGERPRINT_HEX")
-        assertEquals("PUB_KEY_B64", v2Res.first)
-        assertEquals("FINGERPRINT_HEX", v2Res.second)
+    fun w2p2PayloadParsingHandlesV3AndFlagsLegacyVersions() {
+        val sessHex = "0123456789abcdef0123456789abcdef"
+        val v3Res = GlideDropNode.parseW2p2Request("\t3\tPUB_KEY_B64\t${"a".repeat(64)}\t$sessHex")
+        assertEquals(3, v3Res.version)
+        assertEquals("PUB_KEY_B64", v3Res.pubB64)
+        assertEquals("a".repeat(64), v3Res.tlsFingerprint)
+        assertEquals(16, v3Res.sessionId?.size)
 
-        // 2. Unversioned format: "\t<macPubB64>\t<fingerprint>"
-        val unvRes = GlideDropNode.parseW2P2Line("\tPUB_KEY_B64\tFINGERPRINT_HEX")
-        assertEquals("PUB_KEY_B64", unvRes.first)
-        assertEquals("FINGERPRINT_HEX", unvRes.second)
+        // Legacy v2 format is parsed so responder explicitly refuses downgrade (< v3)
+        val v2Res = GlideDropNode.parseW2p2Request("\t2\tPUB_KEY_B64\tFINGERPRINT_HEX")
+        assertEquals(2, v2Res.version)
+        assertEquals("PUB_KEY_B64", v2Res.pubB64)
+        assertEquals("FINGERPRINT_HEX", v2Res.tlsFingerprint)
 
-        // 3. Version without fingerprint: "\t2\t<macPubB64>"
-        val noFpRes = GlideDropNode.parseW2P2Line("\t2\tPUB_KEY_B64")
-        assertEquals("PUB_KEY_B64", noFpRes.first)
-        assertNull(noFpRes.second)
+        // Unversioned v1 format is tagged version 1
+        val unvRes = GlideDropNode.parseW2p2Request("\tPUB_KEY_B64\tFINGERPRINT_HEX")
+        assertEquals(1, unvRes.version)
+        assertEquals("PUB_KEY_B64", unvRes.pubB64)
+        assertEquals("FINGERPRINT_HEX", unvRes.tlsFingerprint)
 
-        // 4. Empty/whitespace string
-        val emptyRes = GlideDropNode.parseW2P2Line("")
-        assertEquals("", emptyRes.first)
-        assertNull(emptyRes.second)
+        // Empty/whitespace string
+        val emptyRes = GlideDropNode.parseW2p2Request("")
+        assertEquals("", emptyRes.pubB64)
+        assertNull(emptyRes.tlsFingerprint)
     }
 
     @Test
@@ -1126,5 +1130,208 @@ class GlideDropSecurityTest {
         assertFalse(UriSecurity.isSafeWebUrl("https://user:pass@example.com/"))
         assertFalse(UriSecurity.isSafeWebUrl("https://example.com/\u202eevil"))
         assertTrue(UriSecurity.isSafeWebUrl("https://example.com/path?x=1"))
+    }
+
+    @Test
+    fun buildServerTrustManagersAllowsSelfSignedClientCertOverRealTlsAndPinsSession() {
+        val tms = GlideDropNode.buildServerTrustManagers()
+        assertEquals(1, tms.size)
+        val tm = tms[0] as GlideDropNode.P2pSelfSignedClientTrustManager
+        assertEquals(0, tm.acceptedIssuers.size)
+
+        var emptyClientRejected = false
+        try {
+            tm.checkClientTrusted(emptyArray(), "ECDHE_ECDSA")
+        } catch (_: CertificateException) {
+            emptyClientRejected = true
+        }
+        assertTrue(emptyClientRejected)
+
+        var serverTrustRejected = false
+        try {
+            val dummyKs = generateTestKeyStore("dummy-srv", "srv")
+            val dummyCert = dummyKs.getCertificate("dummy-srv") as X509Certificate
+            tm.checkServerTrusted(arrayOf(dummyCert), "ECDHE_ECDSA")
+        } catch (_: CertificateException) {
+            serverTrustRejected = true
+        }
+        assertTrue(serverTrustRejected)
+
+        val serverKs = generateTestKeyStore("srv-alias", "glidedrop-srv")
+        val clientKs = generateTestKeyStore("cli-alias", "glidedrop-mac")
+        val serverCert = serverKs.getCertificate("srv-alias") as X509Certificate
+        val clientCert = clientKs.getCertificate("cli-alias") as X509Certificate
+        val serverFp = GlideDropNode.sha256FingerprintHex(serverCert)
+        val clientFp = GlideDropNode.sha256FingerprintHex(clientCert)
+
+        val srvKmf = javax.net.ssl.KeyManagerFactory.getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()).apply {
+            init(serverKs, "test-keystore-pass".toCharArray())
+        }
+        val srvCtx = javax.net.ssl.SSLContext.getInstance("TLS").apply {
+            init(srvKmf.keyManagers, tms, java.security.SecureRandom())
+        }
+        val cliKmf = javax.net.ssl.KeyManagerFactory.getInstance(javax.net.ssl.KeyManagerFactory.getDefaultAlgorithm()).apply {
+            init(clientKs, "test-keystore-pass".toCharArray())
+        }
+        val cliCtx = javax.net.ssl.SSLContext.getInstance("TLS").apply {
+            init(cliKmf.keyManagers, arrayOf<javax.net.ssl.TrustManager>(GlideDropNode.PinnedTlsTrustManager(serverFp)), java.security.SecureRandom())
+        }
+
+        val serverSocket = (srvCtx.serverSocketFactory.createServerSocket(0, 4, java.net.InetAddress.getByName("127.0.0.1")) as javax.net.ssl.SSLServerSocket).apply {
+            wantClientAuth = true
+        }
+        val observedClientFp = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val serverThread = Thread {
+            serverSocket.accept().use { s ->
+                val sslSock = s as javax.net.ssl.SSLSocket
+                sslSock.startHandshake()
+                val peerCert = sslSock.session.peerCertificates.firstOrNull() as? X509Certificate
+                if (peerCert != null) {
+                    observedClientFp.set(GlideDropNode.sha256FingerprintHex(peerCert))
+                }
+            }
+        }
+        serverThread.start()
+        try {
+            (cliCtx.socketFactory.createSocket("127.0.0.1", serverSocket.localPort) as javax.net.ssl.SSLSocket).use { c ->
+                c.startHandshake()
+            }
+            serverThread.join(5_000)
+        } finally {
+            runCatching { serverSocket.close() }
+        }
+
+        assertEquals(clientFp, observedClientFp.get())
+        val token = "c".repeat(64)
+        val activeTokens = mutableMapOf(
+            token to GlideDropNode.Companion.IncomingSessionTokenState(
+                expiresAtMs = System.currentTimeMillis() + 60_000L,
+                preApprovedTransfer = false,
+                peerTlsFingerprint = clientFp
+            )
+        )
+        assertTrue(
+            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
+                token,
+                activeTokens,
+                trustedPeerFingerprints = setOf(clientFp),
+                verifiedClientTlsFingerprint = observedClientFp.get()
+            )
+        )
+        // Reusable across subsequent mTLS requests with the same verified client fingerprint
+        assertTrue(
+            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
+                token,
+                activeTokens,
+                trustedPeerFingerprints = setOf(clientFp),
+                verifiedClientTlsFingerprint = observedClientFp.get()
+            )
+        )
+    }
+
+    @Test
+    fun evaluateW2p2OutgoingReplyEnforcesEcdsaProofBeforeTrustedSkip() {
+        val ks = generateTestKeyStore("w2p2-reply", "glidedrop-mac")
+        val cert = ks.getCertificate("w2p2-reply") as X509Certificate
+        val privKey = ks.getKey("w2p2-reply", "test-keystore-pass".toCharArray()) as java.security.PrivateKey
+        val macFp = GlideDropNode.sha256FingerprintHex(cert)
+        val macPubB64 = Base64.getEncoder().encodeToString("mac-ecdh-pub".toByteArray(StandardCharsets.UTF_8))
+        val sessionId = ByteArray(GlideDropNode.W2P2_SESSION_ID_BYTES) { (it + 7).toByte() }
+        val sessHex = GlideDropNode.bytesToHex(sessionId)
+
+        fun signDomain(domain: String): String {
+            val msg = "$domain\n${GlideDropNode.W2P2_PROTOCOL_VERSION}\n$macPubB64\n$macFp\n$sessHex"
+            val sig = java.security.Signature.getInstance("SHA256withECDSA").run {
+                initSign(privKey)
+                update(msg.toByteArray(StandardCharsets.UTF_8))
+                sign()
+            }
+            return Base64.getEncoder().encodeToString(sig)
+        }
+
+        val certB64 = Base64.getEncoder().encodeToString(cert.encoded)
+        val validReplySig = signDomain(GlideDropNode.W2P2_REPLY_PROOF_DOMAIN)
+        val crossDomainIdSig = signDomain(GlideDropNode.W2P2_ID_PROOF_DOMAIN)
+
+        assertEquals(
+            GlideDropNode.Companion.W2p2ReplyAuthOutcome.TRUSTED_VERIFIED,
+            GlideDropNode.evaluateW2p2OutgoingReply(
+                macPubB64, macFp, sessionId, certB64, validReplySig,
+                isTrustedPeerFn = { it == macFp }, autoAccept = false
+            )
+        )
+        assertEquals(
+            GlideDropNode.Companion.W2p2ReplyAuthOutcome.PROMPT_REQUIRED_VERIFIED,
+            GlideDropNode.evaluateW2p2OutgoingReply(
+                macPubB64, macFp, sessionId, certB64, validReplySig,
+                isTrustedPeerFn = { false }, autoAccept = false
+            )
+        )
+        // Missing proof must NEVER bypass Android consent prompt even if fingerprint is trusted
+        assertEquals(
+            GlideDropNode.Companion.W2p2ReplyAuthOutcome.PROMPT_REQUIRED_UNVERIFIED,
+            GlideDropNode.evaluateW2p2OutgoingReply(
+                macPubB64, macFp, sessionId, null, null,
+                isTrustedPeerFn = { it == macFp }, autoAccept = false
+            )
+        )
+        // Spoofed/tampered or cross-domain signature must fail closed even under autoAccept
+        assertEquals(
+            GlideDropNode.Companion.W2p2ReplyAuthOutcome.REJECT_INVALID_PROOF,
+            GlideDropNode.evaluateW2p2OutgoingReply(
+                macPubB64, macFp, sessionId, certB64, crossDomainIdSig,
+                isTrustedPeerFn = { true }, autoAccept = true
+            )
+        )
+        assertEquals(
+            GlideDropNode.Companion.W2p2ReplyAuthOutcome.REJECT_INVALID_PROOF,
+            GlideDropNode.evaluateW2p2OutgoingReply(
+                macPubB64, "d".repeat(64), sessionId, certB64, validReplySig,
+                isTrustedPeerFn = { true }, autoAccept = false
+            )
+        )
+        assertEquals(
+            GlideDropNode.Companion.W2p2ReplyAuthOutcome.REJECT_INVALID_PROOF,
+            GlideDropNode.evaluateW2p2OutgoingReply(
+                macPubB64, macFp, sessionId, certB64, null,
+                isTrustedPeerFn = { true }, autoAccept = false
+            )
+        )
+    }
+
+    @Test
+    fun sanitizeUiTextAndHistoryFieldStripTsvCrlfAndBiDiControls() {
+        val sneaky = "MacBook\tPro\r\n999\thttps://evil.test\u202E\u2066" + String(Character.toChars(0xE0041))
+        val cleanUi = GlideDropNode.sanitizeUiText(sneaky)
+        val cleanHist = GlideDropNode.sanitizeHistoryField(sneaky)
+        for (clean in listOf(cleanUi, cleanHist)) {
+            assertFalse(clean.contains('\t'))
+            assertFalse(clean.contains('\r'))
+            assertFalse(clean.contains('\n'))
+            assertFalse(clean.contains('\u202E'))
+            assertFalse(clean.contains('\u2066'))
+            assertTrue(clean.contains("MacBook Pro 999 https://evil.test"))
+        }
+        assertEquals("Fallback", GlideDropNode.sanitizeUiText("\r\n\t\u202E", fallback = "Fallback"))
+    }
+
+    @Test
+    fun emptyUserInfoAtUrlAndAutoAcceptUnverifiedOutcomeAreHandledSafely() {
+        assertFalse(UriSecurity.isSafeWebUrl("https://@evil.example/path"))
+        assertFalse(UriSecurity.isSafeWebUrl("https://user@evil.example/path"))
+        assertTrue(UriSecurity.isSafeWebUrl("https://youtube.com/@mkbhd"))
+
+        val ks = generateTestKeyStore("w2p2-auto", "glidedrop-mac")
+        val cert = ks.getCertificate("w2p2-auto") as X509Certificate
+        val macFp = GlideDropNode.sha256FingerprintHex(cert)
+        val macPubB64 = Base64.getEncoder().encodeToString("mac-pub".toByteArray(StandardCharsets.UTF_8))
+        val sessionId = ByteArray(GlideDropNode.W2P2_SESSION_ID_BYTES) { 1 }
+        assertEquals(
+            GlideDropNode.Companion.W2p2ReplyAuthOutcome.AUTO_ACCEPTED_UNVERIFIED,
+            GlideDropNode.evaluateW2p2OutgoingReply(
+                macPubB64, macFp, sessionId, null, null,
+                isTrustedPeerFn = { false }, autoAccept = true
+            )
+        )
     }
 }

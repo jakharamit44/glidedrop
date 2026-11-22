@@ -471,4 +471,14 @@ class GlideDropNodeRegressionTest {
         assertEquals(null, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(0))
         assertEquals(null, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(-1))
     }
+
+    @Test
+    fun pendingMacTxClaimRejectsWildcardNullAndUnmatchedAddresses() {
+        assertTrue(GlideDropNode.canClaimPendingMacTx("AA:BB:CC:11:22:33", "aa:bb:cc:11:22:33", transferCancelled = false))
+        assertFalse(GlideDropNode.canClaimPendingMacTx(null, "aa:bb:cc:11:22:33", transferCancelled = false))
+        assertFalse(GlideDropNode.canClaimPendingMacTx("  ", "aa:bb:cc:11:22:33", transferCancelled = false))
+        assertFalse(GlideDropNode.canClaimPendingMacTx("AA:BB:CC:11:22:33", "11:22:33:44:55:66", transferCancelled = false))
+        assertFalse(GlideDropNode.canClaimPendingMacTx("AA:BB:CC:11:22:33", null, transferCancelled = false))
+        assertFalse(GlideDropNode.canClaimPendingMacTx("AA:BB:CC:11:22:33", "AA:BB:CC:11:22:33", transferCancelled = true))
+    }
 }

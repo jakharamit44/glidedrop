@@ -4,6 +4,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>GlideDrop: Open-Source AirDrop Alternative for Android and Mac</title>
   <meta name="description"
     content="GlideDrop is an open-source alternative to Apple AirDrop® and Google Quick Share™. Send files between Android and Mac without Wi-Fi using BLE and 5 GHz Wi-Fi Direct.">
@@ -48,16 +50,16 @@
         "applicationCategory": "UtilitiesApplication",
         "applicationSubCategory": "Peer-to-Peer File Transfer",
         "operatingSystem": "Android 12+, macOS 13+",
-        "softwareVersion": "3.0.8",
-        "datePublished": "2026-11-11",
+        "softwareVersion": "3.0.9",
+        "datePublished": "2026-11-22",
         "license": "https://opensource.org/license/mit",
         "isAccessibleForFree": true,
         "url": "https://jakharamit44.github.io/glidedrop/",
         "image": "https://jakharamit44.github.io/glidedrop/og-image.png",
         "downloadUrl": [
-          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.apk",
-          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.pkg",
-          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.dmg"
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.apk",
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.pkg",
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.dmg"
         ],
         "installUrl": "https://github.com/jakharamit44/glidedrop/releases/latest",
         "releaseNotes": "https://github.com/jakharamit44/glidedrop/blob/main/CHANGELOG.md",
@@ -1077,7 +1079,7 @@
       <div class="container">
         <div class="hero-grid">
           <div>
-            <div class="release-pill" id="hero-release-badge">Latest Release (v3.0.8)</div>
+            <div class="release-pill" id="hero-release-badge">Latest Release (v3.0.9)</div>
             <h1>Open-Source AirDrop Alternative for Android and Mac</h1>
             <p class="hero-lead">
               Send files directly between Android and Mac without a shared Wi-Fi router, USB cable, cloud account, or
@@ -1085,11 +1087,11 @@
             </p>
             <div class="cta-group">
               <a id="hero-apk-btn" class="btn btn-primary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.apk">
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.apk">
                 Download Android APK
               </a>
               <a id="hero-pkg-btn" class="btn btn-secondary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.pkg">
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.pkg">
                 Download macOS PKG
               </a>
               <a class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop">
@@ -1184,8 +1186,8 @@
             </div>
             <div class="dl-actions">
               <a id="dl-apk-btn" class="btn btn-primary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.apk">
-                GlideDrop-v3.0.8.apk
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.apk">
+                GlideDrop-v3.0.9.apk
               </a>
             </div>
           </article>
@@ -1201,12 +1203,12 @@
             </div>
             <div class="dl-actions">
               <a id="dl-pkg-btn" class="btn btn-primary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.pkg">
-                GlideDrop-v3.0.8.pkg (Recommended)
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.pkg">
+                GlideDrop-v3.0.9.pkg (Recommended)
               </a>
               <a id="dl-dmg-btn" class="btn btn-secondary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.8.dmg">
-                GlideDrop-v3.0.8.dmg
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.9.dmg">
+                GlideDrop-v3.0.9.dmg
               </a>
             </div>
           </article>
@@ -1458,7 +1460,7 @@
           </details>
           <details class="faq-item">
             <summary>How do I avoid macOS Gatekeeper warnings when installing?</summary>
-            <p>Install with <code id="faq-pkg-name">GlideDrop-v3.0.8.pkg</code>, which installs into
+            <p>Install with <code id="faq-pkg-name">GlideDrop-v3.0.9.pkg</code>, which installs into
               <code>/Applications</code> and runs <code>xattr -cr</code> during setup. If you downloaded the
               <code>.dmg</code>, run the bundled Gatekeeper helper script or run
               <code>xattr -cr "/Applications/GlideDrop.app"</code> in Terminal.</p>
@@ -1476,7 +1478,7 @@
 
   <footer>
     <div class="container footer-grid">
-      <div id="footer-version-text">GlideDrop v3.0.8 &middot; Open source under the MIT License</div>
+      <div id="footer-version-text">GlideDrop v3.0.9 &middot; Open source under the MIT License</div>
       <div class="footer-links">
         <a href="https://github.com/jakharamit44/glidedrop">GitHub</a>
         <a href="https://github.com/jakharamit44/glidedrop/releases">Releases</a>

@@ -6,7 +6,7 @@ plugins {
 android {
     val appVersionName: String = run {
         val vf = rootProject.file("../VERSION")
-        if (vf.exists()) vf.readText().trim() else "2.0.0"
+        if (vf.exists()) vf.readText().trim() else "3.0.9"
     }
     val versionParts = appVersionName.split(".").map { it.toIntOrNull() ?: 0 }
     val versionMajor = versionParts.getOrElse(0) { 3 }
