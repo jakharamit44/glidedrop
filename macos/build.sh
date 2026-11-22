@@ -6,7 +6,8 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "2.0.0")"
 
 echo "[+] Building GlideDrop macOS daemon (v${VERSION})..."
-mkdir -p "$HOME/.glidedrop"
+mkdir -p -m 700 "$HOME/.glidedrop"
+chmod 700 "$HOME/.glidedrop" 2>/dev/null || true
 DAEMON_OUT="$HOME/.glidedrop/glidedrop-daemon"
 ARM64_BIN="$(mktemp /tmp/glidedrop-arm64.XXXXXX)"
 X86_64_BIN="$(mktemp /tmp/glidedrop-x86_64.XXXXXX)"
@@ -77,16 +78,18 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# Strip extended attributes and seal bundle with deep code signature
-echo "[+] Sealing and signing GlideDrop.app bundle..."
-xattr -cr "$APP_DIR"
-# Ad-hoc signatures default to a cdhash requirement, which changes on every rebuild, so macOS
-# (TCC) treats each build as a new app and asks for Location again. Pin a stable identifier and
-# designated requirement so the grant survives rebuilds and reinstalls.
+# Strip extended attributes and seal bundle with deep code signature.
+# For Developer ID builds (GLIDEDROP_CODESIGN_IDENTITY set), use Hardened Runtime and certificate requirement.
+# For ad-hoc builds (`-`), use the default cdhash designated requirement instead of an unconstrained identifier rule
+# so unrelated local binaries claiming the bundle identifier cannot inherit TCC grants.
 APP_ID="io.github.jakharamit44.glidedrop.mac"
+SIGN_IDENTITY="${GLIDEDROP_CODESIGN_IDENTITY:--}"
 sign_app() {
-  codesign --force --deep --sign - --identifier "$APP_ID" \
-    -r="designated => identifier \"$APP_ID\"" "$1"
+  if [ "$SIGN_IDENTITY" != "-" ]; then
+    codesign --force --deep --options runtime --sign "$SIGN_IDENTITY" --identifier "$APP_ID" "$1"
+  else
+    codesign --force --deep --sign - --identifier "$APP_ID" "$1"
+  fi
 }
 sign_app "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"

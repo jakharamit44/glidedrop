@@ -1026,16 +1026,29 @@ struct GlideDropDaemonTests {
 
             // 11a. Valid DVZip/CPIO extraction returns true and writes file
             let sampleIn = srcDir.appendingPathComponent("ble_ok.txt")
-            try! Data("hello-ble-extract".utf8).write(to: sampleIn)
+            let sampleBytes = Data("hello-ble-extract".utf8)
+            try! sampleBytes.write(to: sampleIn)
             let (validGz, _) = try! buildDvzipCpio(files: [sampleIn])
             let okExtract = extractDvzipCpioToDownloads(
                 archiveData: validGz,
-                metaDict: ["SenderComputerName": "PixelTest"],
+                metaDict: [
+                    "SenderComputerName": "PixelTest",
+                    "Files": [["FileName": "ble_ok.txt", "FileSize": sampleBytes.count]]
+                ],
                 downloadsDir: rxDir
             )
             check(okExtract, "Valid archive must return true from extractDvzipCpioToDownloads")
             check(FileManager.default.fileExists(atPath: rxDir.appendingPathComponent("ble_ok.txt").path),
                   "Extracted file must exist in downloadsDir")
+
+            // Missing or mismatched Files manifest must fail closed (VULN-11)
+            check(!extractDvzipCpioToDownloads(archiveData: validGz, metaDict: ["SenderComputerName": "PixelTest"], downloadsDir: rxDir),
+                  "Archive without declared Files manifest must be rejected")
+            check(!extractDvzipCpioToDownloads(
+                archiveData: validGz,
+                metaDict: ["SenderComputerName": "PixelTest", "Files": [["FileName": "other.txt", "FileSize": sampleBytes.count]]],
+                downloadsDir: rxDir
+            ), "Archive whose CPIO name mismatches Files manifest must be rejected")
 
             // 11b. Truncated / corrupt archive must return false (never swallow failure)
             let truncated = Data(validGz.prefix(max(1, validGz.count / 2)))
@@ -1053,7 +1066,12 @@ struct GlideDropDaemonTests {
             let bombFile = srcDir.appendingPathComponent("zeros.bin")
             try! Data(repeating: 0, count: 256 * 1024).write(to: bombFile)
             let (bombGz, _) = try! buildDvzipCpio(files: [bombFile])
-            check(!extractDvzipCpioToDownloads(archiveData: bombGz, metaDict: [:], downloadsDir: rxDir, maxDecompressedBytes: 65_536),
+            check(!extractDvzipCpioToDownloads(
+                archiveData: bombGz,
+                metaDict: ["Files": [["FileName": "zeros.bin", "FileSize": 256 * 1024]]],
+                downloadsDir: rxDir,
+                maxDecompressedBytes: 65_536
+            ),
                   "Archive exceeding maxDecompressedBytes must fail closed with false")
 
             // 11e. forcePrompt: true ignores autoAccept: true and writes pending_ask.json
@@ -1165,7 +1183,12 @@ struct GlideDropDaemonTests {
             var rawMultiCpio = makeRawOdcEntry(name: "./part1.bin", payload: Data(repeating: 0x41, count: 40_000))
             rawMultiCpio.append(makeRawOdcEntry(name: "./part2.bin", payload: Data(repeating: 0x42, count: 40_000)))
             rawMultiCpio.append(makeRawOdcEntry(name: "TRAILER!!!", payload: Data()))
-            check(!extractDvzipCpioToDownloads(archiveData: rawMultiCpio, metaDict: [:], downloadsDir: rxDir, maxDecompressedBytes: 60_000),
+            check(!extractDvzipCpioToDownloads(
+                archiveData: rawMultiCpio,
+                metaDict: ["Files": [["FileName": "part1.bin", "FileSize": 40_000], ["FileName": "part2.bin", "FileSize": 40_000]]],
+                downloadsDir: rxDir,
+                maxDecompressedBytes: 60_000
+            ),
                   "Multi-file raw CPIO exceeding cumulative maxDecompressedBytes must fail closed")
 
             // 11g. Source invariants for ADRE ordering, forcePrompt: true, and Unix socket bridge
@@ -1387,6 +1410,96 @@ struct GlideDropDaemonTests {
             check(!hbSection.contains("parts[0] == \"2\""),
                   "Heartbeat W2P2 handler must not contain legacy v1/v2 parsing")
             print("[PASS] Heartbeat W2P2 v3 handshake & join-active guards")
+        }
+
+        // 15. Security & Reliability Remediation Regressions (v3.0.7 audit)
+        do {
+            // VULN-01: nil, .name, and non-local link-local IPv6 must fail when allowedLocalAddresses is set
+            check(!isAllowedAwdlEndpoint(nil), "isAllowedAwdlEndpoint(nil) must return false")
+            check(!isAllowedAwdlEndpoint(.hostPort(host: .name("attacker.local", nil), port: 9774)),
+                  "isAllowedAwdlEndpoint(.name) must return false")
+            let localCanonical = canonicalLinkLocalIpv6Data(IPv6Address("fe80::1")!.rawValue)!
+            let foreignCanonical = canonicalLinkLocalIpv6Data(IPv6Address("fe80::2")!.rawValue)!
+            check(isAllowedAwdlEndpoint(.hostPort(host: .ipv6(IPv6Address("fe80::1")!), port: 9774), allowedLocalAddresses: [localCanonical]),
+                  "isAllowedAwdlEndpoint must allow address present in allowedLocalAddresses")
+            check(!isAllowedAwdlEndpoint(.hostPort(host: .ipv6(IPv6Address("fe80::2")!), port: 9774), allowedLocalAddresses: [localCanonical]),
+                  "isAllowedAwdlEndpoint must reject foreign address not in allowedLocalAddresses")
+            check(foreignCanonical != localCanonical, "Canonical link-local addresses must remain distinct")
+
+            // VULN-07 / VULN-13: Safe URL filtering, TSV sanitization, & 0700/0600 private file writes
+            check(parseSafeExternalWebUrl("https://example.com/path") != nil, "HTTPS URL must be accepted")
+            check(parseSafeExternalWebUrl("smb://attacker/share") == nil, "SMB URL must be rejected")
+            check(parseSafeExternalWebUrl("file:///System/Applications/Utilities/Terminal.app") == nil, "file:// URL must be rejected")
+            check(parseSafeExternalWebUrl("https://example.com/\ninjected") == nil, "URL with newline must be rejected")
+            let sanitizedPeer = sanitizeHistoryField("Phone\tEvil\n1234\tURL\tsmb://bad")
+            check(!sanitizedPeer.contains("\t") && !sanitizedPeer.contains("\n") && !sanitizedPeer.contains("\r"),
+                  "sanitizeHistoryField must strip tabs and newlines")
+
+            let privDir = testRoot.appendingPathComponent("priv_state_dir")
+            ensurePrivateStateDir(privDir)
+            let privFile = privDir.appendingPathComponent("secret.json")
+            check(writeAtomicPrivateFile(data: Data("{\"ok\":true}".utf8), to: privFile),
+                  "writeAtomicPrivateFile must succeed")
+            let dirAttrs = try? FileManager.default.attributesOfItem(atPath: privDir.path)
+            let fileAttrs = try? FileManager.default.attributesOfItem(atPath: privFile.path)
+            check(((dirAttrs?[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777 == 0o700,
+                  "Private state dir must have 0700 permissions")
+            check(((fileAttrs?[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777 == 0o600,
+                  "Private state file must have 0600 permissions")
+
+            // BUG-03: resolveRestorableHomeWifiSsid must fall back to persisted PREV_WIFI_FILE
+            let prevWifi = testRoot.appendingPathComponent("prev_wifi.txt")
+            try! "HomeFiber5G\n".data(using: .utf8)!.write(to: prevWifi)
+            check(resolveRestorableHomeWifiSsid(inMemorySsid: "", prevWifiFile: prevWifi) == "HomeFiber5G",
+                  "resolveRestorableHomeWifiSsid must read persisted PREV_WIFI_FILE when in-memory SSID is empty")
+            try! "DIRECT-XY-Phone\n".data(using: .utf8)!.write(to: prevWifi)
+            check(resolveRestorableHomeWifiSsid(inMemorySsid: "", prevWifiFile: prevWifi).isEmpty,
+                  "resolveRestorableHomeWifiSsid must ignore DIRECT-* SSIDs")
+
+            // VULN-03: parseW2p2Request 6-field cert+sig parsing + signW2p2IdentityProof verification
+            let idDir = testRoot.appendingPathComponent("w2p2_id")
+            try! FileManager.default.createDirectory(at: idDir, withIntermediateDirectories: true)
+            let kg = Process()
+            kg.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+            kg.arguments = [
+                "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                "-keyout", idDir.appendingPathComponent("key.pem").path,
+                "-out", idDir.appendingPathComponent("cert.pem").path,
+                "-days", "1", "-nodes", "-subj", "/CN=gd-test"
+            ]
+            kg.standardOutput = Pipe()
+            kg.standardError = Pipe()
+            try! kg.run()
+            kg.waitUntilExit()
+            check(kg.terminationStatus == 0, "OpenSSL P-256 test cert generation must succeed")
+            let certDer = loadLocalMacCertDer(stateDir: idDir)
+            check(certDer != nil && !(certDer!.isEmpty), "loadLocalMacCertDer must load PEM cert as DER bytes")
+            let fpHex = SHA256.hash(data: certDer!).map { String(format: "%02x", $0) }.joined()
+            let sessHex = String(repeating: "ab", count: 16)
+            let pubB64 = Data("test-pub".utf8).base64EncodedString()
+            let idProof = signW2p2IdentityProof(version: W2P2_PROTOCOL_VERSION, pubB64: pubB64, tlsFp: fpHex, sessionIdHex: sessHex, stateDir: idDir)
+            check(idProof != nil, "signW2p2IdentityProof must produce cert+signature pair")
+            if let proof = idProof {
+                let parsed6 = parseW2p2Request("\(W2P2_PROTOCOL_VERSION)\t\(pubB64)\t\(fpHex)\t\(sessHex)\t\(proof.certDerB64)\t\(proof.sigB64)")
+                check(parsed6.certDerB64 == proof.certDerB64 && parsed6.identitySigB64 == proof.sigB64,
+                      "parseW2p2Request must preserve optional 5th/6th identity proof fields")
+                let keyPem = try! String(contentsOf: idDir.appendingPathComponent("key.pem"), encoding: .utf8)
+                let privKey = try! P256.Signing.PrivateKey(pemRepresentation: keyPem)
+                let ecdsaSig = try! P256.Signing.ECDSASignature(derRepresentation: Data(base64Encoded: proof.sigB64)!)
+                let msg = "GlideDrop-W2P2-IdProof\n\(W2P2_PROTOCOL_VERSION)\n\(pubB64)\n\(fpHex)\n\(sessHex)"
+                check(privKey.publicKey.isValidSignature(ecdsaSig, for: Data(msg.utf8)),
+                      "ECDSA identity proof signature must verify against key.pem public key")
+            }
+
+            check(formatMacDuration(0) == "", "formatMacDuration(0) must be empty")
+            check(formatMacDuration(-1) == "", "formatMacDuration(-1) must be empty")
+            check(formatMacDuration(45) == "45s", "formatMacDuration(45) must be 45s")
+            check(formatMacDuration(60) == "1m", "formatMacDuration(60) must be 1m")
+            check(formatMacDuration(90) == "1m 30s", "formatMacDuration(90) must be 1m 30s")
+            check(formatMacDuration(3600) == "1h", "formatMacDuration(3600) must be 1h")
+            check(formatMacDuration(3725) == "1h 2m", "formatMacDuration(3725) must be 1h 2m")
+
+            print("[PASS] Audit Phase 1 regressions (VULN-01/03/07/11/13, BUG-03)")
         }
         if failures > 0 {
             fputs("[SUMMARY] \(failures) Swift regression check(s) FAILED\n", stderr)

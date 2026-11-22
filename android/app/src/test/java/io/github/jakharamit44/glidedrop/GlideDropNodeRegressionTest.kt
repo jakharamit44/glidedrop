@@ -446,4 +446,29 @@ class GlideDropNodeRegressionTest {
             assertEquals(listOf("first.txt"), rolledBackCancel)
         }
     }
+
+    @Test
+    fun formatDurationFormatsHumanReadableUnits() {
+        assertEquals("", GlideDropNode.formatDuration(0L))
+        assertEquals("", GlideDropNode.formatDuration(-5L))
+        assertEquals("1s", GlideDropNode.formatDuration(1L))
+        assertEquals("45s", GlideDropNode.formatDuration(45L))
+        assertEquals("1m", GlideDropNode.formatDuration(60L))
+        assertEquals("1m 5s", GlideDropNode.formatDuration(65L))
+        assertEquals("2m 5s", GlideDropNode.formatDuration(125L))
+        assertEquals("1h", GlideDropNode.formatDuration(3600L))
+        assertEquals("1h 1m", GlideDropNode.formatDuration(3661L))
+        assertEquals("2h 3m", GlideDropNode.formatDuration(7384L))
+    }
+
+    @Test
+    fun selectPreferred5GhzP2pFrequencyMhzMatchesNonDfs5GhzOnly() {
+        assertEquals(5745, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(5745))
+        assertEquals(5180, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(5180))
+        assertEquals(5240, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(5240))
+        assertEquals(null, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(2437))
+        assertEquals(null, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(5260))
+        assertEquals(null, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(0))
+        assertEquals(null, GlideDropNode.selectPreferred5GhzP2pFrequencyMhz(-1))
+    }
 }

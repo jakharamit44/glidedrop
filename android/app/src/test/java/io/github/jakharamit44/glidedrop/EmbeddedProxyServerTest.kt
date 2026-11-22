@@ -1277,6 +1277,78 @@ class EmbeddedProxyServerTest {
         }
     }
 
+    @Test
+    fun testStopStartReuseIsolatesClientCount() {
+        val proxy = EmbeddedProxyServer(context = null, port = 0, allowLoopbackClients = true)
+        val isRunningField = EmbeddedProxyServer::class.java.getDeclaredField("isRunning").apply { isAccessible = true }
+        val isRunningAtomic = isRunningField.get(proxy) as java.util.concurrent.atomic.AtomicBoolean
+        val clientCountField = EmbeddedProxyServer::class.java.getDeclaredField("clientCount").apply { isAccessible = true }
+        val clientCountAtomic = clientCountField.get(proxy) as java.util.concurrent.atomic.AtomicInteger
+
+        assertTrue(proxy.start())
+        val port1 = proxy.actualPort
+        val workerHold = Socket("127.0.0.1", port1)
+        // Force a small window for accept worker to register clientCount
+        Thread.sleep(100)
+        proxy.stop()
+        runCatching { workerHold.close() }
+        assertTrue(proxy.start())
+        Thread.sleep(150)
+        assertTrue("clientCount must never go negative across stop/start reuse", clientCountAtomic.get() >= 0)
+        assertTrue(isRunningAtomic.get())
+        proxy.stop()
+    }
+
+    @Test
+    fun testPipeStreamRespectsSharedActivityTimeoutAndPropagatesSocketException() {
+        val proxy = EmbeddedProxyServer(context = null, port = 0, allowLoopbackClients = true)
+        val isRunningField = EmbeddedProxyServer::class.java.getDeclaredField("isRunning").apply { isAccessible = true }
+        (isRunningField.get(proxy) as java.util.concurrent.atomic.AtomicBoolean).set(true)
+
+        val pipeMethod = EmbeddedProxyServer::class.java.getDeclaredMethod(
+            "pipeStream",
+            InputStream::class.java,
+            OutputStream::class.java,
+            java.util.concurrent.atomic.AtomicLong::class.java,
+            Long::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+
+        // 1. Timeout while lastActivityNs is fresh must continue reading subsequent bytes
+        var calls = 0
+        val activeTimeoutInput = object : InputStream() {
+            override fun read(): Int = -1
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                calls++
+                return when (calls) {
+                    1 -> throw java.net.SocketTimeoutException("one-direction idle")
+                    2 -> {
+                        val msg = "ok".toByteArray(StandardCharsets.US_ASCII)
+                        System.arraycopy(msg, 0, b, off, msg.size)
+                        msg.size
+                    }
+                    else -> -1
+                }
+            }
+        }
+        val out = java.io.ByteArrayOutputStream()
+        pipeMethod.invoke(proxy, activeTimeoutInput, out, java.util.concurrent.atomic.AtomicLong(System.nanoTime()), 5_000_000_000L)
+        assertEquals("ok", out.toString(StandardCharsets.US_ASCII.name()))
+
+        // 2. SocketException (peer RST) must propagate out rather than being swallowed
+        val rstInput = object : InputStream() {
+            override fun read(): Int = -1
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                throw java.net.SocketException("Connection reset")
+            }
+        }
+        try {
+            pipeMethod.invoke(proxy, rstInput, java.io.ByteArrayOutputStream(), java.util.concurrent.atomic.AtomicLong(System.nanoTime()), 5_000_000_000L)
+            throw AssertionError("Expected SocketException to propagate")
+        } catch (ite: java.lang.reflect.InvocationTargetException) {
+            assertTrue(ite.cause is java.net.SocketException)
+        }
+    }
+
     private fun readFully(inp: InputStream, buf: ByteArray) {
         var offset = 0
         while (offset < buf.size) {

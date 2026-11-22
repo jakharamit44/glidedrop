@@ -646,6 +646,7 @@ class EmbeddedProxyServer internal constructor(
     fun start(): Boolean {
         if (isRunning.getAndSet(true)) return true
         isStopped.set(false)
+        val runCounter = AtomicInteger(0)
         clientCount.set(0)
         try {
             var srv = ServerSocket()
@@ -684,9 +685,12 @@ class EmbeddedProxyServer internal constructor(
                         continue
                     }
 
-                    // 2. Concurrency limit
-                    if (clientCount.incrementAndGet() > MAX_CONCURRENT_CLIENTS) {
-                        clientCount.decrementAndGet()
+                    // 2. Concurrency limit scoped to this run's counter
+                    val nextCount = runCounter.incrementAndGet()
+                    clientCount.set(nextCount.coerceAtLeast(0))
+                    if (nextCount > MAX_CONCURRENT_CLIENTS) {
+                        val afterDec = runCounter.decrementAndGet().coerceAtLeast(0)
+                        clientCount.set(afterDec)
                         logger?.invoke("EmbeddedProxyServer: client limit reached ($MAX_CONCURRENT_CLIENTS), dropping connection")
                         runCatching { client.close() }
                         continue
@@ -697,7 +701,7 @@ class EmbeddedProxyServer internal constructor(
                     val exec = executor
                     if (exec == null || !isRunning.get()) {
                         activeSockets.remove(client)
-                        clientCount.decrementAndGet()
+                        clientCount.set(runCounter.decrementAndGet().coerceAtLeast(0))
                         runCatching { client.close() }
                         break
                     }
@@ -715,13 +719,13 @@ class EmbeddedProxyServer internal constructor(
                                 }
                             } finally {
                                 activeSockets.remove(client)
-                                clientCount.decrementAndGet()
+                                clientCount.set(runCounter.decrementAndGet().coerceAtLeast(0))
                                 runCatching { client.close() }
                             }
                         }
                     } catch (_: Throwable) {
                         activeSockets.remove(client)
-                        clientCount.decrementAndGet()
+                        clientCount.set(runCounter.decrementAndGet().coerceAtLeast(0))
                         runCatching { client.close() }
                     }
                 }
@@ -1346,18 +1350,25 @@ class EmbeddedProxyServer internal constructor(
         val outboundOut = outbound.getOutputStream()
 
         val relayDone = AtomicBoolean(false)
+        val lastActivityNs = java.util.concurrent.atomic.AtomicLong(System.nanoTime())
+        val idleTimeoutNs = TimeUnit.MILLISECONDS.toNanos(RELAY_IDLE_TIMEOUT_MS.toLong())
 
         val relayRemoteToClient = {
             var error = false
             try {
-                pipeStream(outboundIn, clientOut)
+                pipeStream(outboundIn, clientOut, lastActivityNs, idleTimeoutNs)
             } catch (_: Throwable) {
                 error = true
             } finally {
-                runCatching { client.shutdownOutput() }
-                if (error || relayDone.get()) {
+                if (error) {
                     runCatching { client.close() }
                     runCatching { outbound.close() }
+                } else {
+                    runCatching { client.shutdownOutput() }
+                    if (relayDone.get()) {
+                        runCatching { client.close() }
+                        runCatching { outbound.close() }
+                    }
                 }
             }
         }
@@ -1369,14 +1380,15 @@ class EmbeddedProxyServer internal constructor(
         try {
             var error = false
             try {
-                pipeStream(clientIn, outboundOut)
+                pipeStream(clientIn, outboundOut, lastActivityNs, idleTimeoutNs)
             } catch (_: Throwable) {
                 error = true
             } finally {
-                runCatching { outbound.shutdownOutput() }
                 if (error) {
                     runCatching { client.close() }
                     runCatching { outbound.close() }
+                } else {
+                    runCatching { outbound.shutdownOutput() }
                 }
             }
             relayDone.set(true)
@@ -1389,21 +1401,29 @@ class EmbeddedProxyServer internal constructor(
         }
     }
 
-    private fun pipeStream(input: InputStream, output: OutputStream) {
+    private fun pipeStream(
+        input: InputStream,
+        output: OutputStream,
+        lastActivityNs: java.util.concurrent.atomic.AtomicLong,
+        idleTimeoutNs: Long
+    ) {
         val buf = ByteArray(BUFFER_SIZE)
-        try {
-            while (isRunning.get()) {
-                val bytesRead = input.read(buf)
-                if (bytesRead == -1) break
+        while (isRunning.get()) {
+            val bytesRead = try {
+                input.read(buf)
+            } catch (ste: SocketTimeoutException) {
+                if ((System.nanoTime() - lastActivityNs.get()) >= idleTimeoutNs) {
+                    throw ste
+                }
+                continue
+            }
+            if (bytesRead == -1) break
+            if (bytesRead > 0) {
+                lastActivityNs.set(System.nanoTime())
                 output.write(buf, 0, bytesRead)
                 output.flush()
+                lastActivityNs.set(System.nanoTime())
             }
-        } catch (_: SocketTimeoutException) {
-            // Idle timeout reached
-        } catch (_: SocketException) {
-            // Normal socket closure or connection reset
-        } catch (_: IOException) {
-            // Stream closed
         }
     }
 

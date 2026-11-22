@@ -39,6 +39,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
 import java.util.Base64
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pManager
@@ -79,6 +80,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -105,7 +107,9 @@ import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.SecureRandom
+import java.security.Signature
 import java.security.cert.CertificateException
+import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.X509EncodedKeySpec
@@ -115,6 +119,7 @@ import java.util.Collections
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
@@ -595,7 +600,8 @@ class GlideDropNode(private val context: Context) {
             presented: String?,
             activeTokens: Map<String, IncomingSessionTokenState>,
             trustedPeerFingerprints: Set<String> = emptySet(),
-            nowMs: Long = System.currentTimeMillis()
+            nowMs: Long = System.currentTimeMillis(),
+            verifiedClientTlsFingerprint: String? = null
         ): Boolean {
             val clean = presented?.trim()?.lowercase(java.util.Locale.US).orEmpty()
             if (clean.length != 64 || !clean.all { it in '0'..'9' || it in 'a'..'f' }) return false
@@ -609,8 +615,16 @@ class GlideDropNode(private val context: Context) {
                 }
             }
             val entry = matchedEntry ?: return false
-            val isTrusted = !entry.peerTlsFingerprint.isNullOrBlank() &&
-                normalizeTlsFingerprint(entry.peerTlsFingerprint) in trustedPeerFingerprints
+            val expectedFp = entry.peerTlsFingerprint?.let { normalizeTlsFingerprint(it) }.orEmpty()
+            val verifiedClientFp = verifiedClientTlsFingerprint?.takeIf { isValidSha256Fingerprint(it) }
+                ?.let { normalizeTlsFingerprint(it) }.orEmpty()
+            val isTrusted = expectedFp.isNotEmpty() &&
+                verifiedClientFp.isNotEmpty() &&
+                MessageDigest.isEqual(
+                    verifiedClientFp.toByteArray(StandardCharsets.US_ASCII),
+                    expectedFp.toByteArray(StandardCharsets.US_ASCII)
+                ) &&
+                expectedFp in trustedPeerFingerprints
             if (isTrusted) return true
             if (entry.preApprovedTransfer) {
                 entry.preApprovedTransfer = false
@@ -728,7 +742,9 @@ class GlideDropNode(private val context: Context) {
             val version: Int,
             val pubB64: String,
             val tlsFingerprint: String?,
-            val sessionId: ByteArray?
+            val sessionId: ByteArray?,
+            val certDerB64: String? = null,
+            val identitySigB64: String? = null
         )
 
         /** Parses the tab-separated body that follows the `W2P2` magic. */
@@ -737,11 +753,36 @@ class GlideDropNode(private val context: Context) {
             val v = parts.firstOrNull()?.toIntOrNull()
             return when {
                 parts.size >= 4 && v != null && v >= 3 ->
-                    W2p2Request(v, parts[1], parts[2], hexToBytesOrNull(parts[3]))
+                    W2p2Request(v, parts[1], parts[2], hexToBytesOrNull(parts[3]), parts.getOrNull(4), parts.getOrNull(5))
                 parts.size >= 3 && (v == 1 || v == 2) -> W2p2Request(v, parts[1], parts[2], null)
                 parts.size >= 2 -> W2p2Request(1, parts[0], parts[1], null)
                 else -> W2p2Request(1, parts.firstOrNull().orEmpty(), null, null)
             }
+        }
+
+        internal fun verifyW2p2IdentityProof(req: W2p2Request): Boolean {
+            if (req.version < W2P2_PROTOCOL_VERSION) return false
+            val tlsFp = req.tlsFingerprint ?: return false
+            if (!isValidSha256Fingerprint(tlsFp)) return false
+            val sessId = req.sessionId ?: return false
+            if (sessId.size != W2P2_SESSION_ID_BYTES || req.pubB64.isBlank()) return false
+            val certB64 = req.certDerB64?.takeIf { it.isNotBlank() } ?: return false
+            val sigB64 = req.identitySigB64?.takeIf { it.isNotBlank() } ?: return false
+            return runCatching {
+                val certDer = Base64.getDecoder().decode(certB64)
+                val sigBytes = Base64.getDecoder().decode(sigB64)
+                val cert = CertificateFactory.getInstance("X.509")
+                    .generateCertificate(ByteArrayInputStream(certDer)) as X509Certificate
+                val expectedFpBytes = hexToBytesOrNull(normalizeTlsFingerprint(tlsFp)) ?: return false
+                val certDigest = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+                if (!MessageDigest.isEqual(certDigest, expectedFpBytes)) return false
+                val msg = "GlideDrop-W2P2-IdProof\n${req.version}\n${req.pubB64}\n${normalizeTlsFingerprint(tlsFp)}\n${bytesToHex(sessId).lowercase(Locale.US)}"
+                Signature.getInstance("SHA256withECDSA").run {
+                    initVerify(cert.publicKey)
+                    update(msg.toByteArray(StandardCharsets.UTF_8))
+                    verify(sigBytes)
+                }
+            }.getOrDefault(false)
         }
 
         internal fun hexToBytesOrNull(hex: String): ByteArray? {
@@ -1004,6 +1045,33 @@ class GlideDropNode(private val context: Context) {
         fun formatSpeed(bps: Long): String {
             if (bps <= 0L) return "0 KB/s"
             return "${formatBytes(bps)}/s"
+        }
+
+        fun formatDuration(seconds: Long): String {
+            if (seconds <= 0L) return ""
+            return when {
+                seconds < 60L -> "${seconds}s"
+                seconds < 3600L -> {
+                    val m = seconds / 60L
+                    val s = seconds % 60L
+                    if (s == 0L) "${m}m" else "${m}m ${s}s"
+                }
+                else -> {
+                    val h = seconds / 3600L
+                    val m = (seconds % 3600L) / 60L
+                    if (m == 0L) "${h}h" else "${h}h ${m}m"
+                }
+            }
+        }
+
+        // UNII-1 and UNII-3 non-DFS 5 GHz frequencies valid for P2P GO / SoftAP.
+        private val NON_DFS_5GHZ_FREQUENCIES = setOf(
+            5180, 5200, 5220, 5240,
+            5745, 5765, 5785, 5805, 5825
+        )
+
+        fun selectPreferred5GhzP2pFrequencyMhz(staFreqMhz: Int): Int? {
+            return staFreqMhz.takeIf { it in NON_DFS_5GHZ_FREQUENCIES }
         }
 
         internal fun isHttpTokenChar(ch: Char): Boolean {
@@ -1439,32 +1507,54 @@ class GlideDropNode(private val context: Context) {
 
     private var transferWakeLock: PowerManager.WakeLock? = null
     private var transferWifiLock: WifiManager.WifiLock? = null
+    private val transferLockStateLock = Any()
+    private var transferLockRefCount = 0
 
     private fun acquireTransferLocks() {
-        runCatching {
-            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-            if (transferWakeLock == null) {
-                transferWakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "glidedrop:transfer_node_lock")?.apply {
-                    setReferenceCounted(false)
-                }
+        synchronized(transferLockStateLock) {
+            transferLockRefCount++
+            val wifiLockSatisfied = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+                transferWifiLock?.isHeld == true
+            if (transferLockRefCount > 1 && transferWakeLock?.isHeld == true && wifiLockSatisfied) {
+                return
             }
-            transferWakeLock?.acquire(60 * 60 * 1000L) // 1 hour max
+            runCatching {
+                val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                if (transferWakeLock == null) {
+                    transferWakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "glidedrop:transfer_node_lock")?.apply {
+                        setReferenceCounted(false)
+                    }
+                }
+                transferWakeLock?.acquire(60 * 60 * 1000L) // 1 hour max
 
-            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            if (transferWifiLock == null) {
-                val lockMode = WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                transferWifiLock = wm?.createWifiLock(lockMode, "glidedrop:transfer_wifi_lock")?.apply {
-                    setReferenceCounted(false)
+                // Avoid WIFI_MODE_FULL_LOW_LATENCY (forces latency_mode=1 in Wi-Fi HAL, hurting bulk TCP A-MPDU).
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    if (transferWifiLock == null) {
+                        @Suppress("DEPRECATION")
+                        val lockMode = WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                        transferWifiLock = wm?.createWifiLock(lockMode, "glidedrop:transfer_wifi_lock")?.apply {
+                            setReferenceCounted(false)
+                        }
+                    }
+                    transferWifiLock?.acquire()
                 }
             }
-            transferWifiLock?.acquire()
         }
     }
 
     private fun releaseTransferLocks() {
-        runCatching {
-            if (transferWakeLock?.isHeld == true) transferWakeLock?.release()
-            if (transferWifiLock?.isHeld == true) transferWifiLock?.release()
+        synchronized(transferLockStateLock) {
+            if (transferLockRefCount > 0) {
+                transferLockRefCount--
+            }
+            if (transferLockRefCount > 0) {
+                return
+            }
+            runCatching {
+                if (transferWakeLock?.isHeld == true) transferWakeLock?.release()
+                if (transferWifiLock?.isHeld == true) transferWifiLock?.release()
+            }
         }
     }
 
@@ -1539,7 +1629,12 @@ class GlideDropNode(private val context: Context) {
     }
 
     fun cancelActiveTransfer() {
-        transferCancelled = true
+        val cancelledTx = synchronized(pendingTxLock) {
+            transferCancelled = true
+            val tx = pendingMacTx
+            pendingMacTx = null
+            tx
+        }
         _transferProgress.value = null
         clearProgressNotification()
         _incomingAsk.value?.let { ask ->
@@ -1547,8 +1642,7 @@ class GlideDropNode(private val context: Context) {
             ask.decision.complete(false)
         }
         onTransferProgress?.invoke("Transfer cancelled", -1, 0L, 0L, 0L, false, false, "")
-        pendingMacTx?.let { tx ->
-            pendingMacTx = null
+        cancelledTx?.let { tx ->
             tx.tryClaim()
             tx.result.complete(false)
         }
@@ -1764,7 +1858,7 @@ class GlideDropNode(private val context: Context) {
         val elapsedMs = (System.currentTimeMillis() - startedAtMs).coerceAtLeast(120L)
         val speedBps = (done * 1000L) / elapsedMs
         val remBytes = (total - done).coerceAtLeast(0L)
-        val etaSec = if (speedBps > 0L) remBytes / speedBps else 0L
+        val etaSec = if (speedBps > 0L && elapsedMs >= 500L && done >= 65_536L) remBytes / speedBps else 0L
         _transferProgress.value = TransferProgress(
             label = label,
             percent = pct.coerceIn(0, 99),
@@ -1830,6 +1924,14 @@ class GlideDropNode(private val context: Context) {
     private var activeGroupSsid: String = ""
     @Volatile
     private var activeGroupPassphrase: String = ""
+    private val discoveredPeersMap = ConcurrentHashMap<String, GlideDropPeer>()
+    private val bleDevicesByAddress = ConcurrentHashMap<String, BluetoothDevice>()
+    private val pingDevicesByAddress = ConcurrentHashMap<String, BluetoothDevice>()
+
+    private fun syncDiscoveredPeersFlow() {
+        _peers.value = discoveredPeersMap.values.sortedByDescending { it.lastSeenMs }
+    }
+
     private val incomingSessionTokensLock = Any()
     private val incomingSessionTokens = LinkedHashMap<String, IncomingSessionTokenState>()
     private val p2pStateLock = Any()
@@ -1838,10 +1940,6 @@ class GlideDropNode(private val context: Context) {
     private var lastExplicitBleMacAdvAtMs: Long = 0L
     @Volatile
     private var lastGattProbeAtMs: Long = 0L
-    @Volatile
-    private var lastW2p2ApprovedAtMs: Long = 0L
-    @Volatile
-    private var lastW2p2ApprovedRemoteAddr: String = ""
     private var wifiTeardownJob: Job? = null
     private val wifiGroupGeneration = AtomicLong(0L)
     private val wifiGroupStarting = AtomicBoolean(false)
@@ -1853,7 +1951,13 @@ class GlideDropNode(private val context: Context) {
     private var lastIncomingDiscoverAtMs: Long = 0L
     @Volatile
     private var trackedP2pNetwork: Network? = null
+    @Volatile
+    private var trackedStaWifiNetwork: Network? = null
+    @Volatile
+    private var trackedStaWifiFrequencyMhz: Int = 0
     private var p2pNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile
+    private var lastMacPeerAddr: String = ""
 
     private fun clearLastMacSessionState() {
         lastMacP2pIp = ""
@@ -1861,6 +1965,7 @@ class GlideDropNode(private val context: Context) {
         lastMacUdpKeepalivePort = 0
         lastMacTlsFingerprint = ""
         lastMacSessionToken = ""
+        lastMacPeerAddr = ""
     }
 
     private fun registerIncomingSessionToken(
@@ -1902,7 +2007,10 @@ class GlideDropNode(private val context: Context) {
         return isValidSessionBearerToken(presented, snapshot)
     }
 
-    private fun consumePreApprovedIncomingSessionToken(presented: String?): Boolean {
+    private fun consumePreApprovedIncomingSessionToken(
+        presented: String?,
+        verifiedClientTlsFingerprint: String? = null
+    ): Boolean {
         val trusted = trustedPeerFingerprints()
         synchronized(incomingSessionTokensLock) {
             val now = System.currentTimeMillis()
@@ -1910,7 +2018,13 @@ class GlideDropNode(private val context: Context) {
             while (it.hasNext()) {
                 if (it.next().value.expiresAtMs <= now) it.remove()
             }
-            return isOrConsumePreApprovedSessionBearerToken(presented, incomingSessionTokens, trusted, now)
+            return isOrConsumePreApprovedSessionBearerToken(
+                presented = presented,
+                activeTokens = incomingSessionTokens,
+                trustedPeerFingerprints = trusted,
+                nowMs = now,
+                verifiedClientTlsFingerprint = verifiedClientTlsFingerprint
+            )
         }
     }
 
@@ -1918,8 +2032,6 @@ class GlideDropNode(private val context: Context) {
         synchronized(incomingSessionTokensLock) {
             incomingSessionTokens.clear()
         }
-        lastW2p2ApprovedAtMs = 0L
-        lastW2p2ApprovedRemoteAddr = ""
     }
 
     internal fun activeP2pSubnets(): List<Pair<ByteArray, Int>> {
@@ -2008,9 +2120,11 @@ class GlideDropNode(private val context: Context) {
         fun tryClaim(): Boolean = claimedFlag.compareAndSet(false, true)
     }
 
+    private val pendingTxLock = Any()
     @Volatile
     private var pendingMacTx: PendingMacTx? = null
     private val activeIncomingL2capCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val bleWakeLock = Any()
 
     private fun saveDirectSharePeer(peer: GlideDropPeer, remoteName: String) {
         prefs.edit {
@@ -2228,6 +2342,15 @@ class GlideDropNode(private val context: Context) {
                     extractP2pAddressFromLinkProperties(cm.getLinkProperties(network))?.let { (ip, prefix, ifName) ->
                         updateActiveP2pInterfaceState(ip, prefix, ifName, resolvedFromOs = true)
                     }
+                } else {
+                    val caps = cm.getNetworkCapabilities(network)
+                    if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                        val freq = (caps.transportInfo as? WifiInfo)?.frequency ?: 0
+                        if (freq > 0) {
+                            trackedStaWifiNetwork = network
+                            trackedStaWifiFrequencyMhz = freq
+                        }
+                    }
                 }
             }
 
@@ -2237,8 +2360,20 @@ class GlideDropNode(private val context: Context) {
                     extractP2pAddressFromLinkProperties(cm.getLinkProperties(network))?.let { (ip, prefix, ifName) ->
                         updateActiveP2pInterfaceState(ip, prefix, ifName, resolvedFromOs = true)
                     }
-                } else if (trackedP2pNetwork == network) {
-                    trackedP2pNetwork = null
+                } else {
+                    if (trackedP2pNetwork == network) {
+                        trackedP2pNetwork = null
+                    }
+                    if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                        val freq = (networkCapabilities.transportInfo as? WifiInfo)?.frequency ?: 0
+                        if (freq > 0) {
+                            trackedStaWifiNetwork = network
+                            trackedStaWifiFrequencyMhz = freq
+                        }
+                    } else if (trackedStaWifiNetwork == network) {
+                        trackedStaWifiNetwork = null
+                        trackedStaWifiFrequencyMhz = 0
+                    }
                 }
             }
 
@@ -2256,6 +2391,10 @@ class GlideDropNode(private val context: Context) {
             }
 
             override fun onLost(network: Network) {
+                if (trackedStaWifiNetwork == network) {
+                    trackedStaWifiNetwork = null
+                    trackedStaWifiFrequencyMhz = 0
+                }
                 if (trackedP2pNetwork == network) {
                     trackedP2pNetwork = null
                     stopWifiDirectGroup()
@@ -2275,10 +2414,30 @@ class GlideDropNode(private val context: Context) {
         val cb = p2pNetworkCallback ?: return
         p2pNetworkCallback = null
         trackedP2pNetwork = null
+        trackedStaWifiNetwork = null
+        trackedStaWifiFrequencyMhz = 0
         runCatching {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             cm?.unregisterNetworkCallback(cb)
         }
+    }
+
+    private fun resolveCurrentStaWifiFrequencyMhz(): Int {
+        val cached = trackedStaWifiFrequencyMhz
+        if (cached > 0) return cached
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val activeFreq = cm?.activeNetwork?.let { net ->
+            val caps = cm.getNetworkCapabilities(net)
+            if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+                (caps.transportInfo as? WifiInfo)?.frequency ?: 0
+            } else {
+                0
+            }
+        } ?: 0
+        if (activeFreq > 0) return activeFreq
+        val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        @Suppress("DEPRECATION")
+        return wm?.connectionInfo?.frequency ?: 0
     }
 
     @Synchronized
@@ -2321,13 +2480,24 @@ class GlideDropNode(private val context: Context) {
                 kotlinx.coroutines.delay(1_000)
                 if (!_running.value || generation != nodeGeneration.get()) return@launch
                 val now = System.currentTimeMillis()
-                _peers.update { curr ->
-                    val active = curr.filter { (now - it.lastSeenMs) <= PEER_TTL_MS }
-                    if (active.none { it.id == "ble-mac" }) {
+                val it = discoveredPeersMap.entries.iterator()
+                var changed = false
+                while (it.hasNext()) {
+                    val entry = it.next()
+                    if ((now - entry.value.lastSeenMs) > PEER_TTL_MS) {
+                        val expiredAddr = entry.value.host.removePrefix("ble://")
+                        it.remove()
+                        bleDevicesByAddress.remove(expiredAddr)
+                        pingDevicesByAddress.remove(expiredAddr)
+                        changed = true
+                    }
+                }
+                if (changed) {
+                    if (discoveredPeersMap.keys.none { it.startsWith("ble-") }) {
                         bleMacDevice = null
                         bleMacPsm = 0
                     }
-                    active
+                    syncDiscoveredPeersFlow()
                 }
             }
         }
@@ -2344,6 +2514,9 @@ class GlideDropNode(private val context: Context) {
             runCatching { context.unregisterReceiver(radioStateReceiver) }
             radioReceiverRegistered = false
         }
+        discoveredPeersMap.clear()
+        bleDevicesByAddress.clear()
+        pingDevicesByAddress.clear()
         _peers.value = emptyList()
         bleMacDevice = null
         bleMacPsm = 0
@@ -2401,6 +2574,7 @@ class GlideDropNode(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startBleWake() {
+        synchronized(bleWakeLock) {
         if (!_running.value || !_permissionsGranted.value) return
         try {
             val bm = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -2472,6 +2646,7 @@ class GlideDropNode(private val context: Context) {
             restartBleScanOnly()
         } catch (t: Throwable) {
             log("BLE init warning: ${t.message}")
+        }
         }
     }
 
@@ -2690,11 +2865,13 @@ class GlideDropNode(private val context: Context) {
         rssi: Int,
         now: Long
     ) {
+        val addrKey = dev.address.lowercase(Locale.US)
+        val peerId = "ble-$addrKey"
         val peerDisplayLabel = if (psm > 0) "$displayMacName (PSM $psm)" else displayMacName
-        val existing = _peers.value.firstOrNull { it.id == "ble-mac" }
+        val existing = discoveredPeersMap[peerId]
         val peerChanged = existing == null || existing.host != "ble://${dev.address}" || existing.port != psm
         val blePeer = GlideDropPeer(
-            id = "ble-mac",
+            id = peerId,
             name = peerDisplayLabel,
             host = "ble://${dev.address}",
             port = psm,
@@ -2702,7 +2879,10 @@ class GlideDropNode(private val context: Context) {
             transport = "5GHz P2P • BLE",
             lastSeenMs = now
         )
-        _peers.value = listOf(blePeer)
+        bleDevicesByAddress[dev.address] = dev
+        discoveredPeersMap.remove("ping-$addrKey")
+        discoveredPeersMap[peerId] = blePeer
+        syncDiscoveredPeersFlow()
         if (peerChanged) {
             log("Discovered live peer over BLE: $displayMacName (${dev.address}, psm=$psm, rssi=$rssi dBm)")
             saveDirectSharePeer(blePeer, displayMacName)
@@ -2744,11 +2924,15 @@ class GlideDropNode(private val context: Context) {
                         lastExplicitBleMacAdvAtMs = probeNow
                         upsertLiveBleMacPeer(dev, displayMacName, gattPsm, result.rssi, probeNow)
                     } else if ((probeNow - lastExplicitBleMacAdvAtMs) > 2_000L) {
-                        bleMacPsm = 0
-                        bleMacDevice = null
-                        val removed = _peers.value.any { it.id == "ble-mac" }
-                        _peers.update { list -> list.filterNot { it.id == "ble-mac" } }
+                        val addrKey = dev.address.lowercase(Locale.US)
+                        if (bleMacDevice?.address == dev.address) {
+                            bleMacPsm = 0
+                            bleMacDevice = null
+                        }
+                        bleDevicesByAddress.remove(dev.address)
+                        val removed = discoveredPeersMap.remove("ble-$addrKey") != null
                         if (removed) {
+                            syncDiscoveredPeersFlow()
                             log("Mac BLE service unpublished (overflow scan only, GATT PSM=0) — removed offline peer")
                         }
                     }
@@ -2809,6 +2993,7 @@ class GlideDropNode(private val context: Context) {
                     activeP2pInterfaceName = groupIface
                 }
                 startEmbeddedProxy()
+                val groupFreq = runCatching { group.frequency }.getOrDefault(0)
                 val resolved = resolveWifiDirectGoInterface(mgr, ch, groupInterface = groupIface) { resolvedIp, _ ->
                     if (generation != wifiGroupGeneration.get()) return@resolveWifiDirectGoInterface
                     val httpsPort = currentHttpsPort()
@@ -2818,7 +3003,7 @@ class GlideDropNode(private val context: Context) {
                         lastWifiGroupReadyAtMs = System.currentTimeMillis()
                         val psm = localBlePsm
                         _p2pStatus.value = "5GHz P2P ($ssid) • BLE PSM $psm"
-                        log("5GHz Wi-Fi Direct P2P Ready: $ssid ($resolvedIp:$httpsPort, cidr=$activeP2pNetworkCidr)")
+                        log("5GHz Wi-Fi Direct P2P Ready: $ssid ($resolvedIp:$httpsPort, freq=${groupFreq}MHz, cidr=$activeP2pNetworkCidr)")
                         refreshLocalAddresses()
                     }
                 }
@@ -2831,7 +3016,7 @@ class GlideDropNode(private val context: Context) {
                         lastWifiGroupReadyAtMs = System.currentTimeMillis()
                         val psm = localBlePsm
                         _p2pStatus.value = "5GHz P2P ($ssid) • BLE PSM $psm"
-                        log("5GHz Wi-Fi Direct P2P Ready: $ssid ($goIp:$httpsPort, cidr=$activeP2pNetworkCidr)")
+                        log("5GHz Wi-Fi Direct P2P Ready: $ssid ($goIp:$httpsPort, freq=${groupFreq}MHz, cidr=$activeP2pNetworkCidr)")
                         refreshLocalAddresses()
                     }
                 }
@@ -2865,33 +3050,78 @@ class GlideDropNode(private val context: Context) {
             mgr.requestGroupInfo(ch) { existing ->
                 if (generation != wifiGroupGeneration.get()) return@requestGroupInfo
                 try {
-                    if (existing != null && existing.isGroupOwner && !existing.networkName.isNullOrEmpty() && !existing.passphrase.isNullOrEmpty()) {
-                        publishGroupReady(existing)
-                        wifiGroupStarting.set(false)
-                    } else {
+                    val preferredFreq = selectPreferred5GhzP2pFrequencyMhz(resolveCurrentStaWifiFrequencyMhz())
+
+                    fun makeLegacyListener(): WifiP2pManager.ActionListener = object : WifiP2pManager.ActionListener {
+                        override fun onSuccess() { if (generation == wifiGroupGeneration.get()) pollGroupInfo() }
+                        override fun onFailure(r2: Int) {
+                            if (generation == wifiGroupGeneration.get()) wifiGroupStarting.set(false)
+                            log("Wi-Fi Direct createGroup status: $r2")
+                        }
+                    }
+
+                    fun createBandFallbackGroup(reason: String? = null) {
+                        if (generation != wifiGroupGeneration.get()) return
+                        val bandMsg = if (reason != null) " ($reason)" else ""
+                        log("Creating 5GHz Wi-Fi Direct group (band=5GHz)$bandMsg")
                         val listener = object : WifiP2pManager.ActionListener {
                             override fun onSuccess() {
                                 if (generation == wifiGroupGeneration.get()) pollGroupInfo()
                             }
-                            override fun onFailure(reason: Int) {
+                            override fun onFailure(r: Int) {
                                 if (generation != wifiGroupGeneration.get()) return
-                                mgr.createGroup(ch, object : WifiP2pManager.ActionListener {
-                                    override fun onSuccess() { if (generation == wifiGroupGeneration.get()) pollGroupInfo() }
-                                    override fun onFailure(r2: Int) {
-                                        if (generation == wifiGroupGeneration.get()) wifiGroupStarting.set(false)
-                                        log("Wi-Fi Direct createGroup status: $r2")
-                                    }
-                                })
+                                mgr.createGroup(ch, makeLegacyListener())
                             }
                         }
-                        val randomPass = randomAlphanumeric(16)
-                        val cfg = WifiP2pConfig.Builder()
+                        val bandCfg = WifiP2pConfig.Builder()
                             .setNetworkName("DIRECT-" + randomAlphanumeric(2) + "-" + randomAlphanumeric(8))
-                            .setPassphrase(randomPass)
+                            .setPassphrase(randomAlphanumeric(16))
                             .enablePersistentMode(false)
                             .setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ)
                             .build()
-                        mgr.createGroup(ch, cfg, listener)
+                        mgr.createGroup(ch, bandCfg, listener)
+                    }
+
+                    fun createNewGroup() {
+                        if (generation != wifiGroupGeneration.get()) return
+                        if (preferredFreq != null) {
+                            log("Creating 5GHz Wi-Fi Direct group (SCC freq=${preferredFreq}MHz)")
+                            val sccListener = object : WifiP2pManager.ActionListener {
+                                override fun onSuccess() {
+                                    if (generation == wifiGroupGeneration.get()) pollGroupInfo()
+                                }
+                                override fun onFailure(reason: Int) {
+                                    if (generation != wifiGroupGeneration.get()) return
+                                    createBandFallbackGroup("SCC freq=${preferredFreq}MHz failed: $reason")
+                                }
+                            }
+                            // setGroupOperatingBand and setGroupOperatingFrequency are mutually exclusive on WifiP2pConfig.Builder.
+                            val sccCfg = WifiP2pConfig.Builder()
+                                .setNetworkName("DIRECT-" + randomAlphanumeric(2) + "-" + randomAlphanumeric(8))
+                                .setPassphrase(randomAlphanumeric(16))
+                                .enablePersistentMode(false)
+                                .setGroupOperatingFrequency(preferredFreq)
+                                .build()
+                            mgr.createGroup(ch, sccCfg, sccListener)
+                        } else {
+                            createBandFallbackGroup()
+                        }
+                    }
+
+                    if (existing != null && existing.isGroupOwner && !existing.networkName.isNullOrEmpty() && !existing.passphrase.isNullOrEmpty()) {
+                        val existingFreq = runCatching { existing.frequency }.getOrDefault(0)
+                        if (!isTransferInProgress && preferredFreq != null && existingFreq > 0 && existingFreq != preferredFreq) {
+                            log("Removing stale MCC Wi-Fi Direct group (${existing.networkName} at ${existingFreq}MHz != STA ${preferredFreq}MHz) to recreate SCC group")
+                            mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                                override fun onSuccess() { createNewGroup() }
+                                override fun onFailure(reason: Int) { createNewGroup() }
+                            })
+                        } else {
+                            publishGroupReady(existing)
+                            wifiGroupStarting.set(false)
+                        }
+                    } else {
+                        createNewGroup()
                     }
                 } catch (t: Throwable) {
                     if (generation == wifiGroupGeneration.get()) wifiGroupStarting.set(false)
@@ -3333,6 +3563,36 @@ class GlideDropNode(private val context: Context) {
                         val sessionKey = material.sessionKey
                         val sessionToken = material.token
                         log("${sendPhasePrefix}W2P2 v$W2P2_PROTOCOL_VERSION verification code ${material.verificationCode}")
+                        if (!autoAccept && !isTrustedPeer(rawPin)) {
+                            if (_incomingAsk.value != null || transferCancelled) {
+                                w2p2PinRejected = true
+                                return W2p2TransferState.FAILED_CLOSED
+                            }
+                            val deferred = CompletableDeferred<Boolean>()
+                            _incomingAsk.value = IncomingAskPrompt(
+                                senderName = peerDisplayName,
+                                summary = "Confirm code matches $peerDisplayName before sharing 5 GHz Wi-Fi credentials and sending $label.",
+                                fileNames = emptyList(),
+                                totalBytes = totalRawBytes,
+                                decision = deferred,
+                                verificationCode = material.verificationCode,
+                                rememberPeer = null
+                            )
+                            val approved = try {
+                                kotlinx.coroutines.withTimeoutOrNull(W2P2_CONSENT_WINDOW_MS) { deferred.await() } == true
+                            } finally {
+                                if (_incomingAsk.value?.decision === deferred) _incomingAsk.value = null
+                            }
+                            if (!approved || transferCancelled) {
+                                w2p2PinRejected = true
+                                runCatching {
+                                    out.write("NO\n".toByteArray(StandardCharsets.US_ASCII))
+                                    out.flush()
+                                }
+                                log("${sendPhasePrefix}Outgoing W2P2 verification code declined/timed out")
+                                return W2p2TransferState.FAILED_CLOSED
+                            }
+                        }
                         reportConnecting(label, totalRawBytes, fileCount, isSending = true, phase = "Waiting for $peerDisplayName to join 5GHz link… (code ${material.verificationCode})", peerName = peerDisplayName)
                         registerIncomingSessionToken(sessionToken, preApprovedTransfer = false, peerTlsFingerprint = rawPin)
                         val proxyPort = activeProxyPortOr0()
@@ -3360,6 +3620,7 @@ class GlideDropNode(private val context: Context) {
                                 lastMacUdpKeepalivePort = udpKeepalivePort
                                 lastMacTlsFingerprint = pinnedPeerFingerprint.orEmpty()
                                 lastMacSessionToken = sessionToken
+                                lastMacPeerAddr = runCatching { sock.remoteDevice?.address.orEmpty() }.getOrDefault("")
                             }
                             log("Mac ready at $macIp:$macRxPort (TLS pinned: $pinnedPeerFingerprint) — streaming over 5GHz Wi-Fi…")
                             txOk = sendOverWifiDirectHttps(
@@ -3415,6 +3676,7 @@ class GlideDropNode(private val context: Context) {
         var ownsReceiveTransfer = false
         var bleSessionKey: ByteArray? = null
         var credsIssuedGeneration = -1L
+        var socketW2p2ApprovedAtMs = 0L
         var pendingReplies = 0
         var w2p2Consent: W2p2ConsentState? = null
         // Read timeout: until a consented W2P2 completes, a connection that stays silent is closed.
@@ -3463,44 +3725,49 @@ class GlideDropNode(private val context: Context) {
                         val macName = parts.getOrNull(0)?.trim().orEmpty().ifEmpty { "MacBook Pro" }
                         val macPsm = parts.getOrNull(1)?.trim()?.toIntOrNull()?.takeIf { it > 0 } ?: 0
                         val macRssi = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: -48
-                        learnedMacName = macName
-                        if (macPsm > 0) {
-                            bleMacPsm = macPsm
-                            lastExplicitBleMacAdvAtMs = System.currentTimeMillis()
-                        }
-                        sock.remoteDevice?.let { bleMacDevice = it }
-
-                        val effectivePsm = if (bleMacPsm > 0) bleMacPsm else 0
-                        val psmSuffix = if (effectivePsm > 0) " (PSM $effectivePsm)" else ""
-                        val now = System.currentTimeMillis()
-                        val wasEmpty = _peers.value.none { it.id == "ble-mac" }
-                        val blePeer = GlideDropPeer(
-                            id = "ble-mac",
-                            name = "$macName$psmSuffix",
-                            host = "ble://${sock.remoteDevice?.address ?: "mac"}",
-                            port = effectivePsm,
-                            rssi = macRssi,
-                            transport = "5GHz P2P • BLE",
-                            lastSeenMs = now
-                        )
-                        _peers.value = listOf(blePeer)
-                        if (wasEmpty) {
-                            log("Discovered live peer over BLE: $macName ($remoteAddr, psm=$effectivePsm, rssi=$macRssi dBm)")
-                            saveDirectSharePeer(blePeer, macName)
+                        val addrKey = remoteAddr.lowercase(Locale.US)
+                        val verifiedScanPeer = discoveredPeersMap["ble-$addrKey"]
+                        if (verifiedScanPeer == null) {
+                            sock.remoteDevice?.let { pingDevicesByAddress[remoteAddr] = it }
+                            val psmSuffix = if (macPsm > 0) " (PSM $macPsm)" else ""
+                            val now = System.currentTimeMillis()
+                            val pingId = "ping-$addrKey"
+                            val wasEmpty = !discoveredPeersMap.containsKey(pingId)
+                            val pingPeer = GlideDropPeer(
+                                id = pingId,
+                                name = "$macName$psmSuffix",
+                                host = "ble://$remoteAddr",
+                                port = macPsm,
+                                rssi = macRssi,
+                                transport = "5GHz P2P • BLE",
+                                lastSeenMs = now
+                            )
+                            discoveredPeersMap[pingId] = pingPeer
+                            syncDiscoveredPeersFlow()
+                            if (wasEmpty) {
+                                log("Discovered unverified peer via BLE PING: $macName ($remoteAddr, psm=$macPsm, rssi=$macRssi dBm)")
+                            }
                         }
 
                         busy.set(true)
-                        val tx = pendingMacTx
-                        if (tx == null || (tx.targetPeerAddress != null && tx.targetPeerAddress != remoteAddr) || !tx.tryClaim()) {
+                        val tx = synchronized(pendingTxLock) {
+                            val cand = pendingMacTx
+                            if (transferCancelled || cand == null ||
+                                (cand.targetPeerAddress != null && !cand.targetPeerAddress.equals(remoteAddr, ignoreCase = true)) ||
+                                !cand.tryClaim()
+                            ) {
+                                null
+                            } else {
+                                pendingMacTx = null
+                                cand
+                            }
+                        }
+                        if (tx == null) {
                             val pong = "PONG\t$deviceName\t$localBlePsm\n"
                             out.write(pong.toByteArray(StandardCharsets.UTF_8))
                             out.flush()
                             break
                         } else {
-                            if (pendingMacTx === tx) {
-                                pendingMacTx = null
-                            }
-                            transferCancelled = false
                             activeTransferSocket = sock
                             var txOk = false
                             var wp2pJoined = false
@@ -3670,10 +3937,11 @@ class GlideDropNode(private val context: Context) {
                                 cs = W2p2ConsentState(reqKey, pair, material)
                                 w2p2Consent = cs
                             }
+                            val w2p2IdVerified = verifyW2p2IdentityProof(w2p2Req)
                             if (!cs.approved) {
-                                if (autoAccept || isTrustedPeer(macCertFingerprint)) {
+                                if (autoAccept || (w2p2IdVerified && isTrustedPeer(macCertFingerprint))) {
                                     cs.approved = true
-                                    log("BLE W2P2 from $remoteAddr: ${if (autoAccept) "auto-accept" else "trusted peer"}, code ${cs.material.verificationCode}")
+                                    log("BLE W2P2 from $remoteAddr: ${if (autoAccept) "auto-accept" else "verified trusted peer"}, code ${cs.material.verificationCode}")
                                 } else {
                                     busy.set(true)
                                     var deferred = cs.deferred
@@ -3691,13 +3959,13 @@ class GlideDropNode(private val context: Context) {
                                             summary = "Allow a secure 5 GHz Wi-Fi Direct link so $peerLabel can send files.",
                                             decision = deferred,
                                             verificationCode = cs.material.verificationCode,
-                                            rememberPeer = cs.remember
+                                            rememberPeer = if (w2p2IdVerified) cs.remember else null
                                         )
                                         onConsentNotification?.invoke(
                                             "Allow $peerLabel to send files?",
                                             "Verification code ${cs.material.verificationCode}. Tap to review."
                                         )
-                                        log("BLE W2P2 from $remoteAddr awaiting user consent (code ${cs.material.verificationCode})")
+                                        log("BLE W2P2 from $remoteAddr awaiting user consent (code ${cs.material.verificationCode}, idVerified=$w2p2IdVerified)")
                                     }
                                     val decision = kotlinx.coroutines.withTimeoutOrNull(W2P2_CONSENT_WINDOW_MS) { deferred.await() }
                                     if (decision == null && !transferCancelled && pendingReplies < MAX_CONSENT_PENDING_REPLIES) {
@@ -3715,7 +3983,7 @@ class GlideDropNode(private val context: Context) {
                                         break
                                     }
                                     cs.approved = true
-                                    if (cs.remember.get()) trustPeer(macCertFingerprint)
+                                    if (cs.remember.get() && w2p2IdVerified) trustPeer(macCertFingerprint)
                                 }
                             }
                             busy.set(true)
@@ -3756,8 +4024,7 @@ class GlideDropNode(private val context: Context) {
                                 val proxyPortOut = activeProxyPortOr0()
                                 if (ssidOut.isNotEmpty() && passOut.isNotEmpty() && parseNumericIpBytes(goIpOut) != null && httpsPortOut in 1..65535) {
                                     val material = cs.material
-                                    lastW2p2ApprovedAtMs = System.currentTimeMillis()
-                                    lastW2p2ApprovedRemoteAddr = remoteAddr
+                                    socketW2p2ApprovedAtMs = System.currentTimeMillis()
                                     registerIncomingSessionToken(
                                         material.token,
                                         preApprovedTransfer = true,
@@ -3854,10 +4121,16 @@ class GlideDropNode(private val context: Context) {
                     out.flush()
                     break
                 }
-                if (!beginIncomingTransfer(receiveOwner)) {
+                val isSameSocketW2p2Fallback = (credsIssuedGeneration >= 0L && credsIssuedGeneration == wifiGroupGeneration.get())
+                if (!beginIncomingTransfer(receiveOwner, wifiHandoff = isSameSocketW2p2Fallback)) {
                     out.write("BUSY\n".toByteArray(StandardCharsets.US_ASCII))
                     out.flush()
                     break
+                }
+                if (isSameSocketW2p2Fallback) {
+                    incomingWifiHandshakePending = false
+                    credsIssuedGeneration = -1L
+                    stopWifiDirectGroup()
                 }
                 ownsReceiveTransfer = true
                 activeTransferSocket = sock
@@ -3896,13 +4169,10 @@ class GlideDropNode(private val context: Context) {
                 }
 
                 busy.set(true)
-                val recentW2p2FallbackApproved = lastW2p2ApprovedRemoteAddr == remoteAddr &&
-                    (System.currentTimeMillis() - lastW2p2ApprovedAtMs) in 0L..60_000L
-                val preApprovedAdre = autoAccept || recentW2p2FallbackApproved
-                if (recentW2p2FallbackApproved) {
-                    lastW2p2ApprovedAtMs = 0L
-                    lastW2p2ApprovedRemoteAddr = ""
-                }
+                val sameSocketFallbackApproved = socketW2p2ApprovedAtMs > 0L &&
+                    (System.currentTimeMillis() - socketW2p2ApprovedAtMs) in 0L..60_000L
+                val preApprovedAdre = autoAccept || sameSocketFallbackApproved
+                socketW2p2ApprovedAtMs = 0L
                 val accepted = if (preApprovedAdre) {
                     onConsentNotification?.invoke(null, null)
                     true
@@ -4048,7 +4318,8 @@ class GlideDropNode(private val context: Context) {
     @SuppressLint("MissingPermission")
     private suspend fun sendOverBleL2cap(
         rawEntries: List<GlideDropCodec.OutgoingEntry>,
-        url: String?
+        url: String?,
+        targetPeer: GlideDropPeer? = null
     ): Boolean = withContext(Dispatchers.IO) {
         val prepared = prepareOutgoingFiles(rawEntries)
         val entries = prepared.entries
@@ -4058,7 +4329,9 @@ class GlideDropNode(private val context: Context) {
                 return@withLock false
             }
             acquireTransferLocks()
-            transferCancelled = false
+            synchronized(pendingTxLock) {
+                transferCancelled = false
+            }
             try {
                 val fileDicts = prepared.metadata
                 val metaBytes = GlideDropCodec.encodeBplist(
@@ -4085,7 +4358,15 @@ class GlideDropNode(private val context: Context) {
                     url ?: "BLE Transfer"
                 }
                 val fileCount = maxOf(1, entries.size)
-                val targetPeerLabel = learnedMacName ?: "MacBook Pro"
+                val selectedAddr = targetPeer?.host
+                    ?.removePrefix("ble://")
+                    ?.takeIf { it.isNotBlank() && it != "mac" }
+                val targetPeerLabel = targetPeer?.name
+                    ?.substringBefore(" (PSM")
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: learnedMacName
+                    ?: "MacBook Pro"
 
                 // Pre-warm 5GHz Wi-Fi Direct group concurrently with BLE handshake so SSID/passphrase are ready immediately
                 if (totalRawBytes >= 65_536L && entries.isNotEmpty() && wifiDirectCreds.isEmpty()) {
@@ -4099,7 +4380,8 @@ class GlideDropNode(private val context: Context) {
                 val cachedUdpPort = lastMacUdpKeepalivePort
                 val cachedFp = lastMacTlsFingerprint
                 val cachedToken = lastMacSessionToken
-                if (cachedPort in 1..65535 && cachedUdpPort in 1..65535 && isAddressInActiveP2pSubnet(cachedIp) && isValidSha256Fingerprint(cachedFp) && cachedToken.isNotBlank()) {
+                val cachedPeerMatches = selectedAddr == null || lastMacPeerAddr.isEmpty() || lastMacPeerAddr.equals(selectedAddr, ignoreCase = true)
+                if (cachedPeerMatches && cachedPort in 1..65535 && cachedUdpPort in 1..65535 && isAddressInActiveP2pSubnet(cachedIp) && isValidSha256Fingerprint(cachedFp) && cachedToken.isNotBlank()) {
                     reportConnecting(label, totalRawBytes, fileCount, isSending = true, phase = "Connecting over 5GHz Wi-Fi Direct…", peerName = targetPeerLabel)
                     log("Streaming directly over active 5GHz Wi-Fi Direct link ($cachedIp:$cachedPort)…")
                     if (
@@ -4137,7 +4419,9 @@ class GlideDropNode(private val context: Context) {
                 }
                 reportConnecting(label, totalRawBytes, fileCount, isSending = true, phase = initialConnectPhase, peerName = targetPeerLabel)
                 val deferred = CompletableDeferred<Boolean>()
-                val targetAddr = bleMacDevice?.address
+                val directDev = selectedAddr?.let { bleDevicesByAddress[it] ?: pingDevicesByAddress[it] }
+                    ?: if (selectedAddr == null) bleMacDevice else null
+                val targetAddr = selectedAddr ?: directDev?.address
                 val tx = PendingMacTx(
                     metaBytes = metaBytes,
                     archiveBytes = archiveBytes,
@@ -4149,12 +4433,20 @@ class GlideDropNode(private val context: Context) {
                     result = deferred,
                     targetPeerAddress = targetAddr
                 )
-                pendingMacTx = tx
+                synchronized(pendingTxLock) {
+                    if (transferCancelled) {
+                        tx.tryClaim()
+                        deferred.complete(false)
+                        return@withLock false
+                    }
+                    pendingMacTx = tx
+                }
                 log("Queued transfer for Mac BLE L2CAP P2P channel\u2026")
 
                 // Wait one heartbeat window (2.2s) if we already scanned the peer's PSM so we can connect directly without delay;
                 // if an incoming heartbeat L2CAP socket is currently active, allow up to 1.5s extra for it to claim pendingMacTx.
-                val initialHeartbeatWaitMs = if (bleMacDevice != null && bleMacPsm > 0) 2_200L else 12_000L
+                var psm = targetPeer?.port?.takeIf { it > 0 } ?: if (selectedAddr == null) bleMacPsm else 0
+                val initialHeartbeatWaitMs = if (directDev != null && psm > 0) 2_200L else 12_000L
                 val queueStartNs = System.nanoTime()
                 val initialHeartbeatDeadlineNs = queueStartNs + initialHeartbeatWaitMs * 1_000_000L
                 val maxExtraHeartbeatDeadlineNs = initialHeartbeatDeadlineNs + 1_500L * 1_000_000L
@@ -4169,11 +4461,16 @@ class GlideDropNode(private val context: Context) {
                     }
                     kotlinx.coroutines.delay(100)
                 }
-                if (transferCancelled) {
-                    if (pendingMacTx === tx) pendingMacTx = null
-                    tx.tryClaim()
-                    return@withLock false
+                val cancelWhileWaiting = synchronized(pendingTxLock) {
+                    if (transferCancelled) {
+                        if (pendingMacTx === tx) pendingMacTx = null
+                        tx.tryClaim()
+                        true
+                    } else {
+                        false
+                    }
                 }
+                if (cancelWhileWaiting) return@withLock false
                 if (deferred.isCompleted || tx.isClaimed) {
                     val heartbeatOk = deferred.await()
                     if (heartbeatOk) {
@@ -4186,28 +4483,34 @@ class GlideDropNode(private val context: Context) {
                 }
 
                 // 4. Fallback: if Mac heartbeat did not arrive or did not complete and we have a scanned BLE peripheral, try direct L2CAP
-                val dev = bleMacDevice
-                var psm = bleMacPsm
+                val dev = directDev
                 if (dev != null && psm <= 0) {
                     val resolved = resolveMacGattPsm(dev)
                     if (resolved > 0) {
-                        bleMacPsm = resolved
+                        if (bleMacDevice?.address == dev.address || selectedAddr == null) bleMacPsm = resolved
                         psm = resolved
                     }
                 }
-                if (dev != null && (tx.tryClaim() || deferred.isCompleted)) {
-                    if (pendingMacTx === tx) {
-                        pendingMacTx = null
+                val claimedDirect = dev != null && synchronized(pendingTxLock) {
+                    if (transferCancelled) {
+                        false
+                    } else if (tx.tryClaim() || deferred.isCompleted) {
+                        if (pendingMacTx === tx) pendingMacTx = null
+                        true
+                    } else {
+                        false
                     }
+                }
+                if (claimedDirect) {
                     var lastErr: Throwable? = null
                     for (attempt in 1..2) {
                         if (transferCancelled) return@withLock false
-                        val targetDev = bleMacDevice ?: dev
-                        var targetPsm = if (bleMacPsm > 0) bleMacPsm else psm
+                        val targetDev = dev
+                        var targetPsm = if (selectedAddr == null && bleMacPsm > 0) bleMacPsm else psm
                         if (targetPsm <= 0 || attempt > 1) {
                             val resolved = resolveMacGattPsm(targetDev)
                             if (resolved > 0) {
-                                bleMacPsm = resolved
+                                if (bleMacDevice?.address == targetDev.address || selectedAddr == null) bleMacPsm = resolved
                                 psm = resolved
                                 targetPsm = resolved
                             }
@@ -4354,36 +4657,42 @@ class GlideDropNode(private val context: Context) {
                         }
                     }
                     log("BLE L2CAP direct warning: ${lastErr?.message}")
-                } else if (dev != null && (deferred.isCompleted || tx.isClaimed)) {
+                } else if (deferred.isCompleted || tx.isClaimed) {
                     return@withLock deferred.await()
                 }
 
                 // Wait remaining window for Mac BLE L2CAP heartbeat pickup using a fresh unclaimed PendingMacTx if direct L2CAP failed
-                val activeWaitTx = if (!tx.isClaimed && !deferred.isCompleted) {
-                    pendingMacTx = tx
-                    tx
-                } else if (!transferCancelled && System.nanoTime() < totalHeartbeatDeadlineNs) {
-                    val retryDeferred = CompletableDeferred<Boolean>()
-                    PendingMacTx(
-                        metaBytes = metaBytes,
-                        archiveBytes = archiveBytes,
-                        entries = entries,
-                        url = url,
-                        label = label,
-                        fileCount = fileCount,
-                        totalRawBytes = totalRawBytes,
-                        result = retryDeferred,
-                        targetPeerAddress = targetAddr
-                    ).also { pendingMacTx = it }
-                } else {
-                    null
+                val activeWaitTx = synchronized(pendingTxLock) {
+                    if (transferCancelled) {
+                        null
+                    } else if (!tx.isClaimed && !deferred.isCompleted) {
+                        pendingMacTx = tx
+                        tx
+                    } else if (System.nanoTime() < totalHeartbeatDeadlineNs) {
+                        val retryDeferred = CompletableDeferred<Boolean>()
+                        PendingMacTx(
+                            metaBytes = metaBytes,
+                            archiveBytes = archiveBytes,
+                            entries = entries,
+                            url = url,
+                            label = label,
+                            fileCount = fileCount,
+                            totalRawBytes = totalRawBytes,
+                            result = retryDeferred,
+                            targetPeerAddress = targetAddr
+                        ).also { pendingMacTx = it }
+                    } else {
+                        null
+                    }
                 }
                 if (activeWaitTx != null) {
                     while (System.nanoTime() < totalHeartbeatDeadlineNs && !activeWaitTx.result.isCompleted && !activeWaitTx.isClaimed && !transferCancelled) {
                         kotlinx.coroutines.delay(150)
                     }
-                    if (pendingMacTx === activeWaitTx && !activeWaitTx.isClaimed) {
-                        pendingMacTx = null
+                    synchronized(pendingTxLock) {
+                        if (pendingMacTx === activeWaitTx && !activeWaitTx.isClaimed) {
+                            pendingMacTx = null
+                        }
                     }
                     if (transferCancelled) return@withLock false
                     if (activeWaitTx.result.isCompleted || activeWaitTx.isClaimed) {
@@ -4514,6 +4823,7 @@ class GlideDropNode(private val context: Context) {
                     activeTransferSocket = tls
                     configureClientTlsSocket(tls, isPinned = normalizedPin.isNotEmpty())
                     tls.startHandshake()
+                    log("TX TLS ready to $host:$port (${tls.session.protocol} / ${tls.session.cipherSuite})")
                     if (normalizedPin.isNotEmpty()) {
                         val peerCerts = tls.session.peerCertificates
                         val serverCert = peerCerts.firstOrNull() as? X509Certificate
@@ -4780,21 +5090,23 @@ class GlideDropNode(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun stopBleWake() {
-        stopBleAdvertisingOnly()
-        stopBleScanOnly()
-        try {
-            l2capServer?.close()
-        } catch (_: Throwable) {
+        synchronized(bleWakeLock) {
+            stopBleAdvertisingOnly()
+            stopBleScanOnly()
+            try {
+                l2capServer?.close()
+            } catch (_: Throwable) {
+            }
+            try {
+                gattServer?.close()
+            } catch (_: Throwable) {
+            }
+            bleAdvertiser = null
+            bleScanner = null
+            l2capServer = null
+            localBlePsm = 0
+            gattServer = null
         }
-        try {
-            gattServer?.close()
-        } catch (_: Throwable) {
-        }
-        bleAdvertiser = null
-        bleScanner = null
-        l2capServer = null
-        localBlePsm = 0
-        gattServer = null
     }
 
     // =========================================================================
@@ -4805,30 +5117,31 @@ class GlideDropNode(private val context: Context) {
         val generation = nodeGeneration.get()
         scope.launch {
             if (!_running.value || generation != nodeGeneration.get()) return@launch
+            var srv: java.net.ServerSocket? = null
             try {
                 // Accept on a standard ServerSocket without oversized pre-bind SO_RCVBUF so
                 // SYN-ACK window scaling stays compatible and unauthorized TCP peers fail fast.
                 // OS-assigned port (0); the real port is sent to the Mac inside the encrypted credentials.
-                val srv = java.net.ServerSocket()
-                srv.reuseAddress = true
-                srv.bind(InetSocketAddress(0), 32)
+                val boundSocket = java.net.ServerSocket()
+                srv = boundSocket
+                boundSocket.reuseAddress = true
+                boundSocket.bind(InetSocketAddress(0), 32)
                 if (!_running.value || generation != nodeGeneration.get()) {
-                    srv.close()
                     return@launch
                 }
-                val boundPort = srv.localPort.takeIf { it > 0 } ?: throw IOException("HTTPS receiver was not assigned a port")
+                val boundPort = boundSocket.localPort.takeIf { it > 0 } ?: throw IOException("HTTPS receiver was not assigned a port")
                 actualHttpsPort = boundPort
                 if (hasResolvedActualGoIp && activeWifiDirectGoIp.isNotBlank() && activeGroupSsid.isNotEmpty() && activeGroupPassphrase.isNotEmpty()) {
                     wifiDirectCreds = "$activeGroupSsid\t$activeGroupPassphrase\t$activeWifiDirectGoIp\t$boundPort"
                 }
-                serverSocket = srv
+                serverSocket = boundSocket
                 refreshLocalAddresses()
                 log("5GHz P2P HTTPS receiver listening on port $boundPort")
                 while (_running.value && generation == nodeGeneration.get()) {
                     val client = try {
-                        srv.accept()
+                        boundSocket.accept()
                     } catch (e: Throwable) {
-                        if (srv.isClosed || !_running.value) break
+                        if (boundSocket.isClosed || !_running.value) break
                         log("Receiver accept error (recovering): ${e.message}")
                         kotlinx.coroutines.delay(100)
                         continue
@@ -4841,6 +5154,11 @@ class GlideDropNode(private val context: Context) {
                 }
             } catch (t: Throwable) {
                 log("Receiver error: ${t.message}")
+            } finally {
+                runCatching { srv?.close() }
+                if (serverSocket === srv) {
+                    serverSocket = null
+                }
             }
         }
     }
@@ -4869,13 +5187,18 @@ class GlideDropNode(private val context: Context) {
                 true
             ) as SSLSocket).apply {
                 useClientMode = false
-                wantClientAuth = false
+                wantClientAuth = true
                 needClientAuth = false
                 soTimeout = 30_000
             }
             tlsSockRef = sock
             configureHighThroughputTls(sock)
             sock.startHandshake()
+            log("RX TLS ready from $remote (${sock.session.protocol} / ${sock.session.cipherSuite})")
+            val verifiedClientTlsFp: String? = runCatching {
+                val peerCert = sock.session.peerCertificates.firstOrNull() ?: return@runCatching null
+                bytesToHex(MessageDigest.getInstance("SHA-256").digest(peerCert.encoded))
+            }.getOrNull()
             val inp = BufferedInputStream(sock.inputStream, 1_048_576)
             val out = BufferedOutputStream(sock.outputStream, 65536)
             var lastSenderName = "MacBook Pro"
@@ -4989,7 +5312,7 @@ class GlideDropNode(private val context: Context) {
 
                         log("ASK from $sender: $summary")
                         val sessionToken = headers["x-glidedrop-token"]
-                        val preApprovedAsk = autoAccept || consumePreApprovedIncomingSessionToken(sessionToken)
+                        val preApprovedAsk = autoAccept || consumePreApprovedIncomingSessionToken(sessionToken, verifiedClientTlsFp)
                         reportConnecting(
                             label = lastAskLabel,
                             total = totalAskBytes,
@@ -5183,10 +5506,13 @@ class GlideDropNode(private val context: Context) {
                 phase = "Preparing ${entries.size} file(s)…",
                 peerName = peerClean
             )
-            return@withContext sendOverBleL2cap(entries, null)
+            return@withContext sendOverBleL2cap(entries, null, peer)
         }
 
     fun inspectUriMeta(uri: Uri): Pair<String, Long> {
+        if (!UriSecurity.isSafeShareUri(context, uri)) {
+            return "shared_file" to 0L
+        }
         if (uri.scheme == "file") {
             val f = File(uri.path ?: return "shared_file" to 0L)
             return (f.name.ifEmpty { "shared_file" }) to f.length().coerceAtLeast(0L)
@@ -5229,15 +5555,19 @@ class GlideDropNode(private val context: Context) {
                 size = bytes.size.toLong(),
                 openStream = { bytes.inputStream() }
             )
-            return@withContext sendOverBleL2cap(listOf(entry), null)
+            return@withContext sendOverBleL2cap(listOf(entry), null, peer)
         }
 
     suspend fun sendUrlToPeer(peer: GlideDropPeer, url: String): Boolean =
         withContext(Dispatchers.IO) {
-            return@withContext sendOverBleL2cap(emptyList(), url)
+            return@withContext sendOverBleL2cap(emptyList(), url, peer)
         }
 
     private fun resolveUriEntry(uri: Uri): GlideDropCodec.OutgoingEntry? {
+        if (!UriSecurity.isSafeShareUri(context, uri)) {
+            log("Blocked unsafe share URI: $uri")
+            return null
+        }
         if (uri.scheme == "file") {
             val f = File(uri.path ?: return null)
             if (!f.isFile) return null

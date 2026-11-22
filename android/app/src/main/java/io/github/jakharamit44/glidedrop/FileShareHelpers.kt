@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Environment
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.core.content.FileProvider
@@ -24,12 +25,19 @@ internal fun resolveLocalFilePath(rawPath: String): String? {
     return trimmed
 }
 
-internal fun canOpenOrShareHistoryItem(item: ReceivedItem): Boolean =
-    item.isUrl ||
-        !item.isOutgoing ||
-        item.pathOrUrl.startsWith("content://") ||
-        item.pathOrUrl.startsWith("file://") ||
-        item.pathOrUrl.startsWith("/")
+internal fun canOpenOrShareHistoryItem(item: ReceivedItem): Boolean {
+    if (item.isUrl) return UriSecurity.isSafeWebUrl(item.pathOrUrl)
+    if (item.pathOrUrl.startsWith("content://")) return true
+    if (item.pathOrUrl.startsWith("file://") || item.pathOrUrl.startsWith("/")) {
+        val localPath = resolveLocalFilePath(item.pathOrUrl) ?: return false
+        val canonicalFile = runCatching { File(localPath).canonicalFile }.getOrNull() ?: return false
+        val glideDropDir = runCatching {
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "GlideDrop").canonicalPath
+        }.getOrNull() ?: return false
+        return canonicalFile.exists() && UriSecurity.isPathInsideAnyRoot(canonicalFile.path, listOf(glideDropDir))
+    }
+    return false
+}
 
 internal fun openFileWithProviderAsync(
     scope: CoroutineScope,

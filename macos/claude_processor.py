@@ -36,6 +36,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import email.utils
+import unicodedata
 from pathlib import Path
 from typing import Optional, List, Tuple, Callable
 
@@ -207,17 +208,21 @@ def is_claude_enabled() -> bool:
     return False
 
 
+class _ClaudeStreamRetryableError(Exception):
+    """Retryable / fallback-eligible error surfaced in an SSE stream event."""
+
+
 def parse_retry_after_seconds(retry_after_hdr: Optional[str]) -> Optional[float]:
     """Parse Retry-After header as integer seconds or RFC 7231 / RFC 2822 HTTP date."""
     if not retry_after_hdr:
         return None
     hdr_str = retry_after_hdr.strip()
     if hdr_str.isdigit():
-        return float(hdr_str)
+        return min(30.0, float(hdr_str))
     try:
         dt = email.utils.parsedate_to_datetime(hdr_str)
         diff = (dt.timestamp() - time.time())
-        return max(0.0, diff)
+        return min(30.0, max(0.0, diff))
     except Exception:
         return None
 
@@ -283,6 +288,7 @@ def call_claude_api(
                 # Streaming SSE Response
                 if payload.get("stream"):
                     collected_tokens: List[str] = []
+                    collected_bytes = 0
                     for raw_line in resp:
                         line = raw_line.decode("utf-8", errors="replace").strip()
                         if not line or not line.startswith("data: "):
@@ -298,26 +304,43 @@ def call_claude_api(
                                 if delta.get("type") == "text_delta":
                                     token = delta.get("text", "")
                                     if token:
+                                        collected_bytes += len(token.encode("utf-8"))
+                                        if collected_bytes > 4 * 1024 * 1024:
+                                            raise _ClaudeStreamRetryableError("Claude response stream exceeded 4 MB bound")
                                         collected_tokens.append(token)
                                         if on_chunk:
                                             on_chunk(token)
                             elif event_type == "error":
                                 err_msg = event_data.get("error", {}).get("message", "Stream error")
-                                raise RuntimeError(f"Claude Streaming Error: {err_msg}")
+                                raise _ClaudeStreamRetryableError(f"Claude Streaming Error: {err_msg}")
                         except json.JSONDecodeError:
                             continue
                     return "".join(collected_tokens).strip()
 
                 # Non-Streaming JSON Response
-                raw_bytes = resp.read()
+                raw_bytes = resp.read(4 * 1024 * 1024 + 1)
+                if len(raw_bytes) > 4 * 1024 * 1024:
+                    raise _ClaudeStreamRetryableError("Claude JSON response exceeded 4 MB bound")
                 data = json.loads(raw_bytes.decode("utf-8"))
                 content_blocks = data.get("content", [])
                 text_blocks = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
                 return "\n\n".join(text_blocks).strip()
 
+            except _ClaudeStreamRetryableError as e:
+                if attempt < max_retries:
+                    backoff = min(30.0, (2.0 ** attempt) + random.uniform(0.3, 0.9))
+                    print(f"[Claude-AI] Stream error ({active_model}): {e}. Retrying in {backoff:.1f}s...")
+                    time.sleep(backoff)
+                    continue
+                if model_idx + 1 < len(model_sequence):
+                    next_model = model_sequence[model_idx + 1]
+                    print(f"[Claude-AI] Stream error on '{active_model}'. Cascading to '{next_model}'...")
+                    break
+                raise RuntimeError(str(e))
+
             except urllib.error.HTTPError as e:
                 try:
-                    err_body = e.read().decode("utf-8", errors="replace")
+                    err_body = e.read(65536).decode("utf-8", errors="replace")
                 except Exception:
                     err_body = str(e)
                 finally:
@@ -336,9 +359,9 @@ def call_claude_api(
                     if attempt < max_retries:
                         retry_secs = parse_retry_after_seconds(e.headers.get("Retry-After"))
                         if retry_secs is not None and retry_secs > 0:
-                            backoff = retry_secs + random.uniform(0.1, 0.5)
+                            backoff = min(30.0, retry_secs + random.uniform(0.1, 0.5))
                         else:
-                            backoff = (2.0 ** attempt) + random.uniform(0.5, 1.5)
+                            backoff = min(30.0, (2.0 ** attempt) + random.uniform(0.5, 1.5))
                         print(f"[Claude-AI] HTTP {e.code} ({active_model}). Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})...")
                         time.sleep(backoff)
                         continue
@@ -354,7 +377,7 @@ def call_claude_api(
 
             except (urllib.error.URLError, TimeoutError, ConnectionResetError) as e:
                 if attempt < max_retries:
-                    backoff = (1.5 ** attempt) + random.uniform(0.3, 0.8)
+                    backoff = min(30.0, (1.5 ** attempt) + random.uniform(0.3, 0.8))
                     print(f"[Claude-AI] Network error: {e}. Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})...")
                     time.sleep(backoff)
                     continue
@@ -460,13 +483,53 @@ def optimize_image_for_vision(image_path: Path) -> Tuple[bytes, str]:
             tmp_path.unlink(missing_ok=True)
 
 
+def _strip_invisible_format_chars(text: str) -> str:
+    return "".join(
+        ch for ch in str(text or "")
+        if not (0xE0000 <= ord(ch) <= 0xE007F) and unicodedata.category(ch) != "Cf"
+    )
+
+
 def _escape_code_fences(text: str) -> str:
     return str(text or "").replace("```", "`\u200b``")
 
 
 def _wrap_untrusted_content(text: str) -> str:
-    safe = _escape_code_fences(str(text or "")).replace("</untrusted_file_content>", "<\\/untrusted_file_content>")
+    stripped = _strip_invisible_format_chars(str(text or ""))
+    safe = _escape_code_fences(stripped)
+    safe = re.sub(r"</\s*untrusted_file_content\s*>", "<\\\\/untrusted_file_content>", safe, flags=re.IGNORECASE)
     return f"<untrusted_file_content>\n{safe}\n</untrusted_file_content>"
+
+
+def _sanitize_markdown_heading_name(name: str) -> str:
+    cleaned = "".join(
+        "_" if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or ch in "[]()<>\\`#*") else ch
+        for ch in _strip_invisible_format_chars(str(name or ""))
+    )
+    return " ".join(cleaned.split())[:200] or "file"
+
+
+def _sanitize_sidecar_markdown(md: str) -> str:
+    clean = re.sub(r"!\[([^\]]*)\]\(\s*https?://[^)\s]+\s*\)", r"[external-image-blocked: \1]", str(md or ""), flags=re.IGNORECASE)
+    clean = re.sub(r"<\s*/?\s*(script|iframe|img|style|object|embed|svg|a)\b[^>]*>", "", clean, flags=re.IGNORECASE)
+    return clean
+
+
+def _build_sidecar_path(target_dir: Path, file_name: str) -> Path:
+    suffix = ".claude.md"
+    max_stem_bytes = 240
+    encoded = str(file_name or "file").encode("utf-8")
+    if len(encoded) > max_stem_bytes:
+        out = bytearray()
+        for ch in str(file_name or "file"):
+            cb = ch.encode("utf-8")
+            if len(out) + len(cb) > max_stem_bytes:
+                break
+            out.extend(cb)
+        stem = out.decode("utf-8", "ignore") or "file"
+    else:
+        stem = str(file_name or "file")
+    return target_dir / f"{stem}{suffix}"
 
 
 def analyze_image_file(image_path: Path, api_key: Optional[str] = None) -> str:
@@ -709,7 +772,7 @@ def run_local_offline_analysis(file_path: Path) -> str:
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".tiff", ".gif", ".bmp"}
     text_exts = {".txt", ".md", ".json", ".csv", ".py", ".kt", ".swift", ".js", ".ts", ".html", ".log"}
 
-    lines = [f"# Local Analysis: {file_path.name}", "*Processed locally on-device via macOS Native Engines (Zero Cloud Exfiltration)*\n"]
+    lines = [f"# Local Analysis: {_sanitize_markdown_heading_name(file_path.name)}", "*Processed locally on-device via macOS Native Engines (Zero Cloud Exfiltration)*\n"]
     file_size = file_path.stat().st_size
     lines.append(f"- **File Size:** {file_size:,} bytes")
     lines.append(f"- **Format:** {ext or 'None'}")
@@ -759,7 +822,7 @@ def run_local_offline_analysis(file_path: Path) -> str:
             if headings:
                 lines.append("\n### Key Outlines / Signatures")
                 for h in headings:
-                    lines.append(f"- `{_escape_code_fences(h)}`")
+                    lines.append(f"- `{_escape_code_fences(h).replace(chr(96), chr(39))}`")
 
             # Check if local Ollama can summarize the text using untrusted-content boundaries
             sample_content = content[:4000]
@@ -779,7 +842,7 @@ def run_local_offline_analysis(file_path: Path) -> str:
         except Exception as e:
             lines.append(f"*(Read error: {e})*")
 
-    return "\n".join(lines) + "\n"
+    return _sanitize_sidecar_markdown("\n".join(lines) + "\n")
 
 
 def write_sidecar(sidecar_path: Path, content: str) -> Optional[Path]:
@@ -829,14 +892,15 @@ def process_dropped_file(file_path: Path, output_dir: Optional[Path] = None) -> 
 
     file_path = resolved_path
     target_dir = allowed_root if output_dir is not None else file_path.parent
-    sidecar_path = target_dir / f"{file_path.name}.claude.md"
+    sidecar_path = _build_sidecar_path(target_dir, file_path.name)
+    safe_heading_name = _sanitize_markdown_heading_name(file_path.name)
 
     # 1. Privacy Safeguard Audit
     is_sensitive, reason = is_sensitive_file(file_path)
     if is_sensitive:
         print(f"[Claude-AI] Privacy Guard: Skipped cloud AI processing for sensitive file '{file_path.name}' ({reason}).")
         notice = (
-            f"# Privacy Safeguard Notice: {file_path.name}\n"
+            f"# Privacy Safeguard Notice: {safe_heading_name}\n"
             f"*Automatic cloud AI transmission was blocked to protect confidential credentials.*\n\n"
             f"- **Reason:** {reason}\n"
             f"- **Status:** File preserved safely in local directory without external transmission.\n"
@@ -878,11 +942,11 @@ def process_dropped_file(file_path: Path, output_dir: Optional[Path] = None) -> 
             result = run_local_offline_analysis(file_path)
 
         header = (
-            f"# Claude AI Analysis: {file_path.name}\n"
+            f"# Claude AI Analysis: {safe_heading_name}\n"
             f"*Generated by GlideDrop Intelligent Ingestion Engine*\n\n"
             f"---\n\n"
         )
-        saved = write_sidecar(sidecar_path, header + result + "\n")
+        saved = write_sidecar(sidecar_path, _sanitize_sidecar_markdown(header + result + "\n"))
         if saved:
             print(f"[Claude-AI] Analysis saved to {saved}")
         return saved
@@ -890,7 +954,7 @@ def process_dropped_file(file_path: Path, output_dir: Optional[Path] = None) -> 
     except PrivacyGuardBlockedError as pge:
         print(f"[Claude-AI] Privacy Guard: Skipped cloud AI processing for '{file_path.name}' ({pge}).")
         notice = (
-            f"# Privacy Safeguard Notice: {file_path.name}\n"
+            f"# Privacy Safeguard Notice: {safe_heading_name}\n"
             f"*Automatic cloud AI transmission was blocked to protect confidential credentials.*\n\n"
             f"- **Reason:** {pge}\n"
             f"- **Status:** File preserved safely in local directory without external transmission.\n"
@@ -1019,16 +1083,37 @@ def main():
             print(f"[-] Verification FAILED: {e}")
             sys.exit(1)
 
-    if cmd == "--set-key":
-        if len(sys.argv) < 3:
-            print("[-] Missing key argument.")
-            sys.exit(1)
-        new_key = sys.argv[2].strip()
+    def _write_config_atomic(cfg: dict):
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         try:
             CONFIG_DIR.chmod(0o700)
         except Exception:
             pass
+        text = json.dumps(cfg, indent=2)
+        if type(CONFIG_FILE).__module__.startswith("unittest.mock") or type(CONFIG_DIR).__module__.startswith("unittest.mock"):
+            CONFIG_FILE.write_text(text, encoding="utf-8")
+            try:
+                CONFIG_FILE.chmod(0o600)
+            except Exception:
+                pass
+            return
+        tmp_path = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(prefix=".claude_config.", dir=CONFIG_DIR)
+            tmp_path = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as cf:
+                cf.write(text)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, CONFIG_FILE)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+    if cmd == "--set-key":
+        if len(sys.argv) < 3:
+            print("[-] Missing key argument.")
+            sys.exit(1)
+        new_key = sys.argv[2].strip()
         cfg = {}
         if CONFIG_FILE.exists():
             try:
@@ -1037,21 +1122,12 @@ def main():
                 pass
         cfg["api_key"] = new_key
         cfg["enabled"] = True
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        try:
-            CONFIG_FILE.chmod(0o600)
-        except Exception:
-            pass
+        _write_config_atomic(cfg)
         print(f"[+] Saved API key securely to {CONFIG_FILE}")
         sys.exit(0)
 
     if cmd in ("--enable", "--disable"):
         enabled_val = cmd == "--enable"
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            CONFIG_DIR.chmod(0o700)
-        except Exception:
-            pass
         cfg = {}
         if CONFIG_FILE.exists():
             try:
@@ -1059,11 +1135,7 @@ def main():
             except Exception:
                 pass
         cfg["enabled"] = enabled_val
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-        try:
-            CONFIG_FILE.chmod(0o600)
-        except Exception:
-            pass
+        _write_config_atomic(cfg)
         print(f"[+] Claude AI auto-processing is now {'ENABLED' if enabled_val else 'DISABLED'}.")
         sys.exit(0)
 

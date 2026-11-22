@@ -1028,7 +1028,7 @@ class GlideDropSecurityTest {
             )
         )
 
-        // Trusted peer ("Always allow this Mac"): valid token bound to trusted fingerprint auto-approves repeatedly
+        // Trusted peer ("Always allow this Mac"): requires matching verified mTLS client cert fingerprint
         val activeTrusted = mutableMapOf(
             tok to GlideDropNode.Companion.IncomingSessionTokenState(
                 expiresAtMs = now + 60_000L,
@@ -1036,30 +1036,95 @@ class GlideDropSecurityTest {
                 peerTlsFingerprint = macFp
             )
         )
-        assertTrue(
-            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
-                tok,
-                activeTrusted,
-                trustedPeerFingerprints = setOf(macFp),
-                nowMs = now
-            )
-        )
-        assertTrue(
-            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
-                tok,
-                activeTrusted,
-                trustedPeerFingerprints = setOf(macFp),
-                nowMs = now
-            )
-        )
-        // Expired token must fail closed even for a trusted peer
+        // Without verified mTLS client cert, trusted fingerprint bypass must fail closed
         assertFalse(
             GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
                 tok,
                 activeTrusted,
                 trustedPeerFingerprints = setOf(macFp),
-                nowMs = now + 60_001L
+                nowMs = now,
+                verifiedClientTlsFingerprint = null
             )
         )
+        // With mismatched mTLS client cert, trusted fingerprint bypass must fail closed
+        assertFalse(
+            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
+                tok,
+                activeTrusted,
+                trustedPeerFingerprints = setOf(macFp),
+                nowMs = now,
+                verifiedClientTlsFingerprint = "f".repeat(64)
+            )
+        )
+        // With verified matching mTLS client cert, trusted peer auto-approves repeatedly
+        assertTrue(
+            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
+                tok,
+                activeTrusted,
+                trustedPeerFingerprints = setOf(macFp),
+                nowMs = now,
+                verifiedClientTlsFingerprint = macFp
+            )
+        )
+        assertTrue(
+            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
+                tok,
+                activeTrusted,
+                trustedPeerFingerprints = setOf(macFp),
+                nowMs = now,
+                verifiedClientTlsFingerprint = macFp
+            )
+        )
+        // Expired token must fail closed even for a trusted peer with verified mTLS cert
+        assertFalse(
+            GlideDropNode.isOrConsumePreApprovedSessionBearerToken(
+                tok,
+                activeTrusted,
+                trustedPeerFingerprints = setOf(macFp),
+                nowMs = now + 60_001L,
+                verifiedClientTlsFingerprint = macFp
+            )
+        )
+    }
+
+    @Test
+    fun w2p2IdentityProofVerifiesValidMacCertAndRejectsSpoof() {
+        val ks = generateTestKeyStore("w2p2-mac", "glidedrop-mac")
+        val cert = ks.getCertificate("w2p2-mac") as X509Certificate
+        val privKey = ks.getKey("w2p2-mac", "test-keystore-pass".toCharArray()) as java.security.PrivateKey
+        val fpHex = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+            .joinToString("") { "%02x".format(java.util.Locale.US, it) }
+        val pubB64 = Base64.getEncoder().encodeToString("fake-ecdh-pub".toByteArray(StandardCharsets.UTF_8))
+        val sessHex = "ab".repeat(GlideDropNode.W2P2_SESSION_ID_BYTES)
+        val msg = "GlideDrop-W2P2-IdProof\n${GlideDropNode.W2P2_PROTOCOL_VERSION}\n$pubB64\n$fpHex\n$sessHex"
+        val sigBytes = java.security.Signature.getInstance("SHA256withECDSA").run {
+            initSign(privKey)
+            update(msg.toByteArray(StandardCharsets.UTF_8))
+            sign()
+        }
+        val certB64 = Base64.getEncoder().encodeToString(cert.encoded)
+        val sigB64 = Base64.getEncoder().encodeToString(sigBytes)
+
+        val parsed = GlideDropNode.parseW2p2Request("${GlideDropNode.W2P2_PROTOCOL_VERSION}\t$pubB64\t$fpHex\t$sessHex\t$certB64\t$sigB64")
+        assertTrue(GlideDropNode.verifyW2p2IdentityProof(parsed))
+
+        // Spoofed fingerprint claiming another trusted cert without matching cert/sig fails
+        val spoofed = GlideDropNode.parseW2p2Request("${GlideDropNode.W2P2_PROTOCOL_VERSION}\t$pubB64\t${"c".repeat(64)}\t$sessHex\t$certB64\t$sigB64")
+        assertFalse(GlideDropNode.verifyW2p2IdentityProof(spoofed))
+
+        // Missing proof fields (4-field W2P2) fails identity verification
+        val unproven = GlideDropNode.parseW2p2Request("${GlideDropNode.W2P2_PROTOCOL_VERSION}\t$pubB64\t$fpHex\t$sessHex")
+        assertFalse(GlideDropNode.verifyW2p2IdentityProof(unproven))
+    }
+
+    @Test
+    fun uriSecurityRejectsAppPrivatePathsAndUserInfo() {
+        val roots = listOf("/data/user/0/io.github.jakharamit44.glidedrop", "/proc")
+        assertTrue(UriSecurity.isPathInsideAnyRoot("/data/user/0/io.github.jakharamit44.glidedrop/shared_prefs/glidedrop_prefs.xml", roots))
+        assertTrue(UriSecurity.isPathInsideAnyRoot("/proc/self/environ", roots))
+        assertFalse(UriSecurity.isPathInsideAnyRoot("/storage/emulated/0/Download/photo.jpg", roots))
+        assertFalse(UriSecurity.isSafeWebUrl("https://user:pass@example.com/"))
+        assertFalse(UriSecurity.isSafeWebUrl("https://example.com/\u202eevil"))
+        assertTrue(UriSecurity.isSafeWebUrl("https://example.com/path?x=1"))
     }
 }

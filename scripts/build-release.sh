@@ -3,8 +3,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "2.0.0")"
+VERSION="$(cat "$ROOT_DIR/VERSION" 2>/dev/null || echo "3.0.7")"
 RELEASE_DIR="$ROOT_DIR/release"
+ALLOW_DEBUG=0
+DMG_TMP=""
+PKG_SCRIPTS=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --allow-debug)
+            ALLOW_DEBUG=1
+            ;;
+        *)
+            echo "[-] Unknown argument: $arg (supported: --allow-debug)" >&2
+            exit 1
+            ;;
+    esac
+done
+
+cleanup_staging() {
+    [ -n "${DMG_TMP:-}" ] && rm -rf "$DMG_TMP"
+    [ -n "${PKG_SCRIPTS:-}" ] && rm -rf "$PKG_SCRIPTS"
+}
+trap cleanup_staging EXIT
 
 echo "====================================================="
 echo " Building GlideDrop Release v${VERSION}"
@@ -46,11 +67,11 @@ if [ -n "${GLIDEDROP_KEYSTORE_PATH:-}" ] && [ -n "${GLIDEDROP_KEYSTORE_PASSWORD:
         echo "[-] ERROR: Expected signed release APK not found at $APK_SRC" >&2
         exit 1
     fi
-elif [ "${GLIDEDROP_REQUIRE_RELEASE_SIGNING:-0}" = "1" ]; then
-    echo "[-] ERROR: GLIDEDROP_REQUIRE_RELEASE_SIGNING=1 but GLIDEDROP_KEYSTORE_PATH / GLIDEDROP_KEYSTORE_PASSWORD / GLIDEDROP_KEY_ALIAS are not set." >&2
+elif [ "${GLIDEDROP_REQUIRE_RELEASE_SIGNING:-0}" = "1" ] || [ "$ALLOW_DEBUG" != "1" ]; then
+    echo "[-] ERROR: Android release signing env vars (GLIDEDROP_KEYSTORE_PATH / GLIDEDROP_KEYSTORE_PASSWORD / GLIDEDROP_KEY_ALIAS) are required. Pass --allow-debug only for local non-release testing." >&2
     exit 1
 else
-    echo "  -> [WARN] Release signing env vars not set; falling back to debug APK (set GLIDEDROP_KEYSTORE_PATH, GLIDEDROP_KEYSTORE_PASSWORD, GLIDEDROP_KEY_ALIAS for signed release)."
+    echo "  -> [WARN] --allow-debug specified without release signing env vars; building debug APK..."
     ./gradlew assembleDebug --no-daemon
     APK_SRC="$ROOT_DIR/android/app/build/outputs/apk/debug/app-debug.apk"
 fi

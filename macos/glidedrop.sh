@@ -27,6 +27,34 @@ fi
 PORT=0
 PROXY_PORT=0
 
+resolve_python_bin() {
+  local cand first_ok=""
+  for cand in \
+    "${GLIDEDROP_PYTHON_BIN:-}" \
+    "/opt/homebrew/bin/python3" \
+    "/usr/local/bin/python3" \
+    "$(command -v python3 2>/dev/null || true)" \
+    "/usr/bin/python3"; do
+    [[ -n "$cand" && -x "$cand" ]] || continue
+    if [[ -z "$first_ok" ]]; then
+      first_ok="$cand"
+    fi
+    if "$cand" -c 'import ssl, plistlib, zlib; c = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); assert hasattr(c, "set_ciphersuites")' >/dev/null 2>&1; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  printf '%s\n' "${first_ok:-/usr/bin/python3}"
+}
+PYTHON_BIN="$(resolve_python_bin)"
+if [[ "$(basename "$PYTHON_BIN")" == "python3" ]]; then
+  export PATH="$(dirname "$PYTHON_BIN"):$PATH"
+else
+  mkdir -p "$STATE_DIR/bin"
+  ln -sf "$PYTHON_BIN" "$STATE_DIR/bin/python3"
+  export PATH="$STATE_DIR/bin:$PATH"
+fi
+
 ensure_cert() {
   if [[ ! -f "$STATE_DIR/cert.pem" || ! -f "$STATE_DIR/key.pem" ]]; then
     (
@@ -41,18 +69,23 @@ ensure_cert() {
 
 ensure_ble_bin() {
   if [[ -f "$SCRIPT_DIR/glidedrop-daemon.swift" ]] && [[ ! -x "$BLE_BIN" || "$SCRIPT_DIR/glidedrop-daemon.swift" -nt "$BLE_BIN" ]]; then
-    xcrun swiftc -O "$SCRIPT_DIR/glidedrop-daemon.swift" -o "$BLE_BIN" >/dev/null 2>&1 || true
-    APP_MACOS="$SCRIPT_DIR/GlideDrop.app/Contents/MacOS"
-    APP_RES="$SCRIPT_DIR/GlideDrop.app/Contents/Resources"
-    mkdir -p "$APP_MACOS" "$APP_RES"
-    cp -f "$BLE_BIN" "$APP_MACOS/GlideDrop" 2>/dev/null || true
-    cp -f "$SCRIPT_DIR/glidedrop.sh" "$APP_RES/glidedrop.sh" 2>/dev/null || true
-    if [[ -f "$SCRIPT_DIR/AppIcon.icns" ]]; then
-      cp -f "$SCRIPT_DIR/AppIcon.icns" "$APP_RES/AppIcon.icns" 2>/dev/null || true
+    local target_bin="$STATE_DIR/glidedrop-daemon"
+    if xcrun swiftc -O "$SCRIPT_DIR/glidedrop-daemon.swift" -o "$target_bin" >/dev/null 2>&1 && [[ -x "$target_bin" ]]; then
+      chmod 700 "$target_bin" 2>/dev/null || true
+      BLE_BIN="$target_bin"
     fi
-    chmod +x "$APP_RES/glidedrop.sh" 2>/dev/null || true
-    APP_VER="$(cat "$SCRIPT_DIR/../VERSION" 2>/dev/null || echo "2.6.0")"
-    cat > "$SCRIPT_DIR/GlideDrop.app/Contents/Info.plist" << PLIST
+    if [[ ! -d "$SCRIPT_DIR/GlideDrop.app" ]]; then
+      APP_MACOS="$SCRIPT_DIR/GlideDrop.app/Contents/MacOS"
+      APP_RES="$SCRIPT_DIR/GlideDrop.app/Contents/Resources"
+      mkdir -p "$APP_MACOS" "$APP_RES"
+      cp -f "$BLE_BIN" "$APP_MACOS/GlideDrop" 2>/dev/null || true
+      cp -f "$SCRIPT_DIR/glidedrop.sh" "$APP_RES/glidedrop.sh" 2>/dev/null || true
+      if [[ -f "$SCRIPT_DIR/AppIcon.icns" ]]; then
+        cp -f "$SCRIPT_DIR/AppIcon.icns" "$APP_RES/AppIcon.icns" 2>/dev/null || true
+      fi
+      chmod +x "$APP_RES/glidedrop.sh" 2>/dev/null || true
+      APP_VER="$(cat "$SCRIPT_DIR/../VERSION" 2>/dev/null || echo "3.0.7")"
+      cat > "$SCRIPT_DIR/GlideDrop.app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -84,6 +117,7 @@ ensure_ble_bin() {
 </dict>
 </plist>
 PLIST
+    fi
   fi
 }
 
@@ -302,7 +336,7 @@ def current_mac_name():
 
 def write_progress(active: bool, direction: str = "", file_name: str = "", done_bytes: int = 0, total_bytes: int = 0, speed_bps: int = 0, eta_sec: int = 0, pct: int = 0, file_count: int = 1, phase: str = "", peer_name: str = "", is_connecting: bool = False):
     pf = STATE_DIR / "transfer_progress.json"
-    tmp = STATE_DIR / "transfer_progress.json.tmp"
+    tmp = STATE_DIR / f"transfer_progress.json.{os.getpid()}.tmp"
     try:
         if not active:
             if pf.exists():
@@ -324,15 +358,39 @@ def write_progress(active: bool, direction: str = "", file_name: str = "", done_
             "updatedAt": time.time(),
         }
         tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.chmod(tmp, 0o600)
         tmp.replace(pf)
     except Exception:
         pass
 
+def sanitize_history_field(s: str, max_len: int = 512) -> str:
+    cleaned = "".join(" " if (ch in "\r\n\t" or ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F) else ch for ch in str(s or ""))
+    return " ".join(cleaned.split())[:max_len]
+
+def format_duration(seconds: int) -> str:
+    s = int(seconds)
+    if s <= 0:
+        return ""
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        m, rem = divmod(s, 60)
+        return f"{m}m" if rem == 0 else f"{m}m {rem}s"
+    h, rem = divmod(s, 3600)
+    m = rem // 60
+    return f"{h}h" if m == 0 else f"{h}h {m}m"
+
 def append_history(kind: str, path_or_url: str, size_bytes: int, direction: str, peer_name: str):
     rx_log = STATE_DIR / "received.log"
     try:
-        with rx_log.open("a", encoding="utf-8") as lf:
-            lf.write(f"{int(time.time())}\t{kind}\t{path_or_url}\t{int(size_bytes)}\t{direction}\t{peer_name}\n")
+        safe_kind = sanitize_history_field(kind, 16)
+        safe_val = sanitize_history_field(path_or_url, 2048)
+        safe_dir = sanitize_history_field(direction, 16)
+        safe_peer = sanitize_history_field(peer_name, 128)
+        fd = os.open(str(rx_log), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as lf:
+            lf.write(f"{int(time.time())}\t{safe_kind}\t{safe_val}\t{int(size_bytes)}\t{safe_dir}\t{safe_peer}\n")
+        os.chmod(rx_log, 0o600)
     except Exception:
         pass
 
@@ -478,20 +536,56 @@ def _wait_for_user_accept(sender_name: str, file_names: list, total_bytes: int, 
     req_id = str(uuid.uuid4())
     ask_file = STATE_DIR / "pending_ask.json"
     dec_file = STATE_DIR / "ask_decision.json"
+    prompt_proc_lock = threading.Lock()
+    prompt_proc_box = [None]
+    prompt_done = threading.Event()
+
+    def _write_atomic_private(path: Path, text: str):
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tf:
+                tf.write(text)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
+    def _terminate_prompt_proc():
+        prompt_done.set()
+        with prompt_proc_lock:
+            p = prompt_proc_box[0]
+            prompt_proc_box[0] = None
+        if p is not None and p.poll() is None:
+            try:
+                p.terminate()
+                p.wait(timeout=1.0)
+            except Exception:
+                try:
+                    p.kill()
+                    p.wait(timeout=1.0)
+                except Exception:
+                    pass
+
     try:
         if dec_file.exists():
             dec_file.unlink()
-        ask_file.write_text(json.dumps({
+        _write_atomic_private(ask_file, json.dumps({
             "id": req_id,
             "senderName": sender_name,
             "fileNames": file_names,
             "totalBytes": int(total_bytes),
             "timestamp": time.time(),
-        }), encoding="utf-8")
+        }))
 
         summary = f"{len(file_names)} file(s)" if len(file_names) > 1 else (file_names[0] if file_names else "items")
         def prompt_dialog():
-            time.sleep(0.5)
+            if prompt_done.wait(0.5):
+                return
             if dec_file.exists():
                 return
             # If GlideDrop GUI is running, it renders the modal inside the window.
@@ -502,8 +596,10 @@ def _wait_for_user_accept(sender_name: str, file_names: list, total_bytes: int, 
                     return
             except Exception:
                 pass
+            if prompt_done.is_set():
+                return
             try:
-                res = subprocess.check_output([
+                proc = subprocess.Popen([
                     "osascript",
                     "-e", "on run argv",
                     "-e", 'tell application "System Events" to display dialog ((item 1 of argv) & " wants to share " & (item 2 of argv) & " with you.") with title "GlideDrop" buttons {"Decline", "Accept"} default button "Accept" giving up after 40',
@@ -511,11 +607,21 @@ def _wait_for_user_accept(sender_name: str, file_names: list, total_bytes: int, 
                     "--",
                     str(sender_name)[:80],
                     str(summary)[:120]
-                ], text=True, stderr=subprocess.DEVNULL).strip()
+                ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                with prompt_proc_lock:
+                    if prompt_done.is_set():
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                        return
+                    prompt_proc_box[0] = proc
+                res, _ = proc.communicate()
+                res = (res or "").strip()
                 if "button returned:Accept" in res:
-                    dec_file.write_text(json.dumps({"id": req_id, "accepted": True}), encoding="utf-8")
+                    _write_atomic_private(dec_file, json.dumps({"id": req_id, "accepted": True}))
                 elif "button returned:Decline" in res:
-                    dec_file.write_text(json.dumps({"id": req_id, "accepted": False}), encoding="utf-8")
+                    _write_atomic_private(dec_file, json.dumps({"id": req_id, "accepted": False}))
             except Exception:
                 pass
         threading.Thread(target=prompt_dialog, daemon=True).start()
@@ -537,6 +643,7 @@ def _wait_for_user_accept(sender_name: str, file_names: list, total_bytes: int, 
                     pass
             time.sleep(0.15)
     finally:
+        _terminate_prompt_proc()
         try:
             if ask_file.exists():
                 ask_file.unlink()
@@ -908,10 +1015,15 @@ class FixedLengthReader:
 
 
 class StreamDecompressor:
-    def __init__(self, raw_reader, max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES):
+    def __init__(self, raw_reader, max_decompressed_bytes: int = DEFAULT_MAX_DECOMPRESSED_BYTES, max_wall_seconds: float = 1800.0):
         self.raw = raw_reader
         self.max_decompressed_bytes = int(max_decompressed_bytes)
+        self.max_raw_bytes = max(self.max_decompressed_bytes * 2, 16 * 1024 * 1024)
         self.total_decompressed = 0
+        self.total_raw_bytes = 0
+        self.consecutive_zero_output = 0
+        self.max_zero_output_blocks = 8
+        self.deadline = time.monotonic() + float(max_wall_seconds)
         self.buf = bytearray()
         self.mode = "unknown"
         self.decompressor = None
@@ -919,6 +1031,17 @@ class StreamDecompressor:
         self.dvzip_rem = 0
         self.eof = False
         self._init_stream()
+
+    def _check_deadline(self):
+        if time.monotonic() > self.deadline:
+            raise ValueError("Compressed stream exceeded wall-clock deadline")
+
+    def _account_raw(self, count: int):
+        if count <= 0:
+            return
+        self.total_raw_bytes += count
+        if self.total_raw_bytes > self.max_raw_bytes:
+            raise ValueError(f"Raw compressed stream exceeded limit ({self.total_raw_bytes} > {self.max_raw_bytes})")
 
     def _account_decompressed(self, count: int):
         self.total_decompressed += count
@@ -934,19 +1057,32 @@ class StreamDecompressor:
     def _decompress_bounded(self, decomp, chunk: bytes):
         if not chunk:
             return
+        self._check_deadline()
+        produced = 0
         remaining = self.max_decompressed_bytes - self.total_decompressed
         step_cap = min(1048576, max(1, remaining + 1))
         out = decomp.decompress(chunk, max_length=step_cap)
-        self._append_decompressed(out)
+        if out:
+            produced += len(out)
+            self._append_decompressed(out)
         while decomp.unconsumed_tail:
+            self._check_deadline()
             remaining = self.max_decompressed_bytes - self.total_decompressed
             step_cap = min(1048576, max(1, remaining + 1))
             out = decomp.decompress(decomp.unconsumed_tail, max_length=step_cap)
+            if out:
+                produced += len(out)
             if not out and not decomp.unconsumed_tail:
                 break
             self._append_decompressed(out)
             if not out and decomp.unconsumed_tail:
                 break
+        if produced == 0:
+            self.consecutive_zero_output += 1
+            if self.consecutive_zero_output > self.max_zero_output_blocks:
+                raise ValueError("Excessive zero-output compressed blocks")
+        else:
+            self.consecutive_zero_output = 0
 
     def _flush_bounded(self, decomp):
         if decomp is None:
@@ -961,6 +1097,7 @@ class StreamDecompressor:
     def _init_stream(self):
         # Four bytes identify DVZip without stealing bytes from a one-byte first block.
         prefix = self.raw.read_exact(4)
+        self._account_raw(len(prefix))
         if len(prefix) < 4:
             self._append_decompressed(prefix)
             self.mode = "raw"
@@ -969,12 +1106,22 @@ class StreamDecompressor:
             self.mode = "gzip"
             self.decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
             self._decompress_bounded(self.decompressor, prefix)
+            if self.decompressor.eof:
+                if self.decompressor.unused_data:
+                    raise ValueError("Trailing data after gzip stream")
+                if self.raw.read(1):
+                    raise ValueError("Trailing data after gzip stream")
+                self._flush_bounded(self.decompressor)
+                self.decompressor = None
+                self.eof = True
         elif prefix == b"0707":
             self.mode = "raw"
             self._append_decompressed(prefix)
         else:
             self.mode = "dvzip"
             v = struct.unpack(">I", prefix[:4])[0]
+            if v == 0x80000000:
+                raise ValueError("Empty DVZip stored block")
             self.dvzip_stored = bool(v & 0x80000000)
             self.dvzip_rem = v & 0x7FFFFFFF
             if not self.dvzip_stored:
@@ -987,8 +1134,10 @@ class StreamDecompressor:
             return b""
         # Zero-copy fast path for stored DVZip blocks (eliminates intermediate self.buf copies & memmoves)
         if self.mode == "dvzip" and not self.buf and not self.eof:
+            self._check_deadline()
             if self.dvzip_rem == 0:
                 hdr4 = self.raw.read_exact(4)
+                self._account_raw(len(hdr4))
                 if len(hdr4) < 4:
                     if hdr4:
                         raise EOFError("Truncated DVZip block header")
@@ -998,6 +1147,8 @@ class StreamDecompressor:
                     self.eof = True
                 else:
                     v = struct.unpack(">I", hdr4)[0]
+                    if v == 0x80000000:
+                        raise ValueError("Empty DVZip stored block")
                     if v == 0:
                         if self.decompressor:
                             self._flush_bounded(self.decompressor)
@@ -1012,16 +1163,19 @@ class StreamDecompressor:
                 chunk = self.raw.read(want)
                 if not chunk:
                     raise EOFError("Truncated stored DVZip block")
+                self._account_raw(len(chunk))
                 self._account_decompressed(len(chunk))
                 self.dvzip_rem -= len(chunk)
                 return chunk
 
         while len(self.buf) < n and not self.eof:
+            self._check_deadline()
             if self.mode == "raw":
                 chunk = self.raw.read(max(262144, n - len(self.buf)))
                 if not chunk:
                     self.eof = True
                     break
+                self._account_raw(len(chunk))
                 self._append_decompressed(chunk)
             elif self.mode == "gzip":
                 chunk = self.raw.read(262144)
@@ -1030,13 +1184,24 @@ class StreamDecompressor:
                         self._flush_bounded(self.decompressor)
                     self.eof = True
                     break
+                self._account_raw(len(chunk))
                 self._decompress_bounded(self.decompressor, chunk)
+                if self.decompressor.eof:
+                    if self.decompressor.unused_data:
+                        raise ValueError("Trailing data after gzip stream")
+                    if self.raw.read(1):
+                        raise ValueError("Trailing data after gzip stream")
+                    self._flush_bounded(self.decompressor)
+                    self.decompressor = None
+                    self.eof = True
+                    break
             elif self.mode == "dvzip":
                 if self.dvzip_rem > 0:
                     want = min(1048576 if self.dvzip_stored else 65536, self.dvzip_rem)
                     chunk = self.raw.read(want) if self.dvzip_stored else self.raw.read_exact(want)
                     if not chunk:
                         raise EOFError("Truncated DVZip block")
+                    self._account_raw(len(chunk))
                     self.dvzip_rem -= len(chunk)
                     if self.dvzip_stored:
                         self._append_decompressed(chunk)
@@ -1049,6 +1214,7 @@ class StreamDecompressor:
                             self.decompressor = None
                 else:
                     hdr4 = self.raw.read_exact(4)
+                    self._account_raw(len(hdr4))
                     if len(hdr4) < 4:
                         if hdr4:
                             raise EOFError("Truncated DVZip block header")
@@ -1058,6 +1224,8 @@ class StreamDecompressor:
                         self.eof = True
                         break
                     v = struct.unpack(">I", hdr4)[0]
+                    if v == 0x80000000:
+                        raise ValueError("Empty DVZip stored block")
                     if v == 0:
                         if self.decompressor:
                             self._flush_bounded(self.decompressor)
@@ -1086,11 +1254,28 @@ class StreamDecompressor:
         return bytes(buf)
 
 
+def truncate_utf8_filename(name: str, max_bytes: int = 239) -> str:
+    if len(name.encode("utf-8")) <= max_bytes:
+        return name
+    stem, ext = os.path.splitext(name)
+    if len(ext.encode("utf-8")) >= max_bytes:
+        ext = ""
+        stem = name
+    budget = max(1, max_bytes - len(ext.encode("utf-8")))
+    out = bytearray()
+    for ch in stem:
+        cb = ch.encode("utf-8")
+        if len(out) + len(cb) > budget:
+            break
+        out.extend(cb)
+    return (out.decode("utf-8", "ignore") or "file") + ext
+
+
 def publish_noclobber(staged: Path, target: Path):
     stem, suffix = target.stem, target.suffix
     idx = 0
     while True:
-        candidate = target if idx == 0 else target.with_name(f"{stem}_{idx}{suffix}")
+        candidate = target if idx == 0 else target.with_name(truncate_utf8_filename(f"{stem}_{idx}{suffix}", 239))
         try:
             os.link(staged, candidate, follow_symlinks=False)
             staged.unlink()
@@ -1191,7 +1376,7 @@ def extract_cpio_stream(stream, dest_dir: Path, fsync_files: bool = True, approv
                     "_" if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or _ud.category(ch) == "Cf" or ch in '/\\:*?"<>|') else ch
                     for ch in raw_base.strip()
                 )
-                safe_name = cleaned.lstrip(".-").rstrip(" .") or "glidedrop_file"
+                safe_name = truncate_utf8_filename(cleaned.lstrip(".-").rstrip(" .") or "glidedrop_file", 239)
                 target = dest_dir / safe_name
                 if target.resolve().parent == dest_resolved:
                     free_bytes = shutil.disk_usage(dest_resolved).free
@@ -1201,13 +1386,13 @@ def extract_cpio_stream(stream, dest_dir: Path, fsync_files: bool = True, approv
                     orig_stem = target.stem
                     orig_suffix = target.suffix
                     while target.exists() or target.is_symlink():
-                        target = dest_dir / f"{orig_stem}_{idx}{orig_suffix}"
+                        target = dest_dir / truncate_utf8_filename(f"{orig_stem}_{idx}{orig_suffix}", 239)
                         idx += 1
                     part_target = target.with_name(target.name + ".part")
                     while part_target.exists() or part_target.is_symlink():
                         if part_target.is_symlink():
                             raise ValueError(f"Refusing symlink staging path: {part_target}")
-                        target = dest_dir / f"{orig_stem}_{idx}{orig_suffix}"
+                        target = dest_dir / truncate_utf8_filename(f"{orig_stem}_{idx}{orig_suffix}", 239)
                         part_target = target.with_name(target.name + ".part")
                         idx += 1
                     fd = None
@@ -1294,7 +1479,7 @@ def stream_upload_to_dir(f, headers, dest_dir: Path, track_progress: bool = Fals
                 tot = max(expected_total, done[0], 1)
                 el = max(0.08, now - t0)
                 spd = int(done[0] / el)
-                eta = int(max(0, tot - done[0]) / max(1, spd))
+                eta = int(max(0, tot - done[0]) / spd) if (spd > 0 and el >= 0.5 and done[0] >= 65536) else 0
                 pct = min(99, int((done[0] * 100) / tot))
                 write_progress(True, "Receiving", file_label, min(done[0], tot), tot, spd, eta, pct, file_count, phase="Receiving files", peer_name=peer_name, is_connecting=False)
                 if now - last_term_log[0] >= 2.0 or done[0] >= tot:
@@ -1302,7 +1487,9 @@ def stream_upload_to_dir(f, headers, dest_dir: Path, track_progress: bool = Fals
                     mb_done = done[0] / (1024 * 1024)
                     mb_tot = tot / (1024 * 1024)
                     spd_mb = spd / (1024 * 1024)
-                    print(f"[P2P-Receiver] Receiving '{file_label}': {mb_done:.1f} MB / {mb_tot:.1f} MB ({pct}%, {spd_mb:.1f} MB/s, ETA {eta}s)")
+                    eta_label = format_duration(eta)
+                    eta_part = f", ETA {eta_label}" if eta_label else ""
+                    print(f"[P2P-Receiver] Receiving '{file_label}': {mb_done:.1f} MB / {mb_tot:.1f} MB ({pct}%, {spd_mb:.1f} MB/s{eta_part})")
                     sys.stdout.flush()
 
     try:
@@ -1437,7 +1624,38 @@ def build_url_prompt_osascript_argv(target_url: str, sender_name: str) -> list:
     ]
 
 
+ACTIVE_RX_LOCK = threading.Lock()
+ACTIVE_RX_COUNT = 0
+
+def cleanup_finder_recovery_dir(recovery: Path, max_age_s: float = 3600.0, max_total_bytes: int = 2 * 1024 * 1024 * 1024):
+    if not recovery.exists() or recovery.is_symlink():
+        return
+    now = time.time()
+    entries = []
+    for child in recovery.iterdir():
+        if child.is_symlink() or not child.is_dir() or not child.name.startswith("transfer-"):
+            continue
+        try:
+            st = child.stat()
+            if (now - st.st_mtime) > max_age_s:
+                shutil.rmtree(child, ignore_errors=True)
+                continue
+            sz = sum(f.stat().st_size for f in child.rglob("*") if f.is_file() and not f.is_symlink())
+            entries.append((st.st_mtime, sz, child))
+        except Exception:
+            shutil.rmtree(child, ignore_errors=True)
+    total = sum(item[1] for item in entries)
+    if total > max_total_bytes:
+        entries.sort(key=lambda item: item[0])
+        for _, sz, child in entries:
+            if total <= max_total_bytes:
+                break
+            shutil.rmtree(child, ignore_errors=True)
+            total -= sz
+
 def handle_client(conn, addr, is_p2p_proxy: bool = False):
+    rx_counter_lock = globals().setdefault("ACTIVE_RX_LOCK", threading.Lock())
+    globals().setdefault("ACTIVE_RX_COUNT", 0)
     last_sender = "Android Peer"
     last_label = "Incoming File"
     last_total = 0
@@ -1456,10 +1674,16 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
     def touch_rx_lock():
         nonlocal owns_rx_lock
         try:
-            tmp_lock = STATE_DIR / f"rx_in_progress.lock.{threading.get_ident()}.tmp"
-            tmp_lock.write_text(f"{os.getpid()}\t{peer_ip}\t{time.time()}")
-            tmp_lock.replace(rx_lock)
-            owns_rx_lock = True
+            with rx_counter_lock:
+                if not owns_rx_lock:
+                    globals()["ACTIVE_RX_COUNT"] = globals().get("ACTIVE_RX_COUNT", 0) + 1
+                    owns_rx_lock = True
+                tmp_lock = STATE_DIR / f"rx_in_progress.lock.{threading.get_ident()}.tmp"
+                fd = os.open(str(tmp_lock), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as lf:
+                    lf.write(f"{os.getpid()}\t{peer_ip}\t{time.time()}")
+                os.chmod(tmp_lock, 0o600)
+                tmp_lock.replace(rx_lock)
         except Exception:
             pass
 
@@ -1589,7 +1813,7 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                     approved_token = headers.get("x-glidedrop-token", "").strip().lower()
                     for it in items:
                         if isinstance(it, str) and (it.startswith("http://") or it.startswith("https://")):
-                            if not re.match(r"^https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$", it):
+                            if not re.fullmatch(r"https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+", it):
                                 print(f"[-] Dropping malformed or suspicious URL: {it}")
                                 continue
                             append_history("URL", it, len(it), "received", last_sender)
@@ -1632,9 +1856,10 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                 conn.settimeout(30.0)
                 if is_p2p_proxy:
                     recovery = STATE_DIR / "finder_recovery"
-                    recovery.mkdir(mode=0o700, parents=True, exist_ok=True)
                     if recovery.is_symlink():
                         raise ValueError("Finder recovery directory must not be a symlink")
+                    recovery.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    cleanup_finder_recovery_dir(recovery)
                     tmp_dir = Path(tempfile.mkdtemp(prefix="transfer-", dir=recovery))
                     try:
                         saved, rx_len = stream_upload_to_dir(f, headers, tmp_dir, track_progress=False, file_label=last_label, expected_total=exp_tot, file_count=last_count, fsync_files=False, approved_manifest=approved_manifest)
@@ -1645,6 +1870,13 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                     except ValueError:
                         shutil.rmtree(tmp_dir, ignore_errors=True)
                         send_resp(conn, 400, "Bad Request", b"", close=True)
+                        break
+                    except OSError as oe:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                        if "disk space" in str(oe).lower():
+                            send_resp(conn, 507, "Insufficient Storage", b"", close=True)
+                        else:
+                            send_resp(conn, 400, "Bad Request", b"", close=True)
                         break
                     except Exception:
                         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1669,6 +1901,12 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
                         break
                     except ValueError:
                         send_resp(conn, 400, "Bad Request", b"", close=True)
+                        break
+                    except OSError as oe:
+                        if "disk space" in str(oe).lower():
+                            send_resp(conn, 507, "Insufficient Storage", b"", close=True)
+                        else:
+                            send_resp(conn, 400, "Bad Request", b"", close=True)
                         break
                     print(f"[{role}] {method} {path} from {addr} ({rx_len} B)")
                     for p in saved:
@@ -1699,11 +1937,15 @@ def handle_client(conn, addr, is_p2p_proxy: bool = False):
         sys.stdout.flush()
     finally:
         if owns_rx_lock:
-            write_progress(False)
-            try:
-                rx_lock.unlink(missing_ok=True)
-            except Exception:
-                pass
+            with rx_counter_lock:
+                remaining_rx = max(0, globals().get("ACTIVE_RX_COUNT", 1) - 1)
+                globals()["ACTIVE_RX_COUNT"] = remaining_rx
+            if remaining_rx == 0:
+                write_progress(False)
+                try:
+                    rx_lock.unlink(missing_ok=True)
+                except Exception:
+                    pass
         try:
             conn.shutdown(socket.SHUT_WR)
         except Exception:
@@ -1757,6 +1999,10 @@ def write_bound_port_file(filename: str, value):
         pass
 
 CLIENT_SLOTS = threading.BoundedSemaphore(16)
+FINDER_PROXY_SLOTS = threading.BoundedSemaphore(4)
+
+def _slot_pool_for(is_p2p_proxy: bool):
+    return FINDER_PROXY_SLOTS if (is_p2p_proxy and "FINDER_PROXY_SLOTS" in globals()) else CLIENT_SLOTS
 
 def serve_tls_client(raw, addr, is_p2p_proxy):
     try:
@@ -1775,11 +2021,14 @@ def serve_tls_client(raw, addr, is_p2p_proxy):
                 local_ip = ipaddress.ip_address(tls.getsockname()[0].replace("::ffff:", "").split("%", 1)[0])
                 if not session or local_ip not in ipaddress.ip_network(session["cidr"], strict=False):
                     return
+                cipher_name = (tls.cipher() or ("?",))[0]
+                print(f"[P2P-Receiver] TLS handshake from {ip}: {tls.version()} / {cipher_name}")
+                sys.stdout.flush()
             handle_client(tls, addr, is_p2p_proxy)
     except Exception:
         raw.close()
     finally:
-        CLIENT_SLOTS.release()
+        _slot_pool_for(is_p2p_proxy).release()
 
 
 def serve_port(bind_port: int, is_p2p_proxy: bool, unix_sock_path=None, on_bound=None):
@@ -1843,13 +2092,14 @@ def serve_port(bind_port: int, is_p2p_proxy: bool, unix_sock_path=None, on_bound
                         continue
                 raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            if not CLIENT_SLOTS.acquire(blocking=False):
+            slot_pool = _slot_pool_for(is_p2p_proxy)
+            if not slot_pool.acquire(blocking=False):
                 raw.close()
                 continue
             try:
                 threading.Thread(target=serve_tls_client, args=(raw, addr, is_p2p_proxy), daemon=True).start()
             except Exception:
-                CLIENT_SLOTS.release()
+                slot_pool.release()
                 raise
         except Exception:
             raw.close()
@@ -1904,6 +2154,22 @@ def read_awdl_bridge_port() -> int:
         pass
     return 0
 
+def _is_transfer_progress_active(ttl: float = 60.0) -> bool:
+    pf = STATE_DIR / "transfer_progress.json"
+    if not pf.exists():
+        return False
+    try:
+        obj = json.loads(pf.read_text(encoding="utf-8"))
+        if obj.get("active") is not True:
+            return False
+        updated_at = float(obj.get("updatedAt") or 0.0)
+        return (time.time() - updated_at) < ttl
+    except Exception:
+        try:
+            return (time.time() - pf.stat().st_mtime) < ttl
+        except Exception:
+            return False
+
 def watch_awdl_mdns():
     pid_file = STATE_DIR / "awdl-mdns.pid"
     rx_lock = STATE_DIR / "rx_in_progress.lock"
@@ -1914,7 +2180,7 @@ def watch_awdl_mdns():
     proc = None
     while True:
         try:
-            if _is_lock_active(rx_lock, 30.0) or _is_lock_active(tx_lock, 180.0):
+            if _is_lock_active(rx_lock, 30.0) or _is_lock_active(tx_lock, 180.0) or _is_transfer_progress_active(60.0):
                 if proc and proc.poll() is None:
                     proc.terminate()
                 proc = None
@@ -2058,7 +2324,7 @@ _active_raw_sock = [None]
 
 def write_progress(active: bool, direction: str = "", file_name: str = "", done_bytes: int = 0, total_bytes: int = 0, speed_bps: int = 0, eta_sec: int = 0, pct: int = 0, file_count: int = 1, phase: str = "", peer_name: str = "", is_connecting: bool = False):
     pf = STATE_DIR / "transfer_progress.json"
-    tmp = STATE_DIR / "transfer_progress.json.tmp"
+    tmp = STATE_DIR / f"transfer_progress.json.{os.getpid()}.tmp"
     try:
         if not active:
             if pf.exists():
@@ -2080,15 +2346,39 @@ def write_progress(active: bool, direction: str = "", file_name: str = "", done_
             "updatedAt": time.time(),
         }
         tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.chmod(tmp, 0o600)
         tmp.replace(pf)
     except Exception:
         pass
 
+def sanitize_history_field(s: str, max_len: int = 512) -> str:
+    cleaned = "".join(" " if (ch in "\r\n\t" or ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F) else ch for ch in str(s or ""))
+    return " ".join(cleaned.split())[:max_len]
+
+def format_duration(seconds: int) -> str:
+    s = int(seconds)
+    if s <= 0:
+        return ""
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        m, rem = divmod(s, 60)
+        return f"{m}m" if rem == 0 else f"{m}m {rem}s"
+    h, rem = divmod(s, 3600)
+    m = rem // 60
+    return f"{h}h" if m == 0 else f"{h}h {m}m"
+
 def append_history(kind: str, path_or_url: str, size_bytes: int, direction: str, peer_name: str):
     rx_log = STATE_DIR / "received.log"
     try:
-        with rx_log.open("a", encoding="utf-8") as lf:
-            lf.write(f"{int(time.time())}\t{kind}\t{path_or_url}\t{int(size_bytes)}\t{direction}\t{peer_name}\n")
+        safe_kind = sanitize_history_field(kind, 16)
+        safe_val = sanitize_history_field(path_or_url, 2048)
+        safe_dir = sanitize_history_field(direction, 16)
+        safe_peer = sanitize_history_field(peer_name, 128)
+        fd = os.open(str(rx_log), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as lf:
+            lf.write(f"{int(time.time())}\t{safe_kind}\t{safe_val}\t{int(size_bytes)}\t{safe_dir}\t{safe_peer}\n")
+        os.chmod(rx_log, 0o600)
     except Exception:
         pass
 
@@ -2345,6 +2635,13 @@ try:
     print(f"[+] Connecting to Android peer over 5GHz Wi-Fi at {host}:{port}...")
     ctx = ssl.create_default_context()
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    client_cert = STATE_DIR / "cert.pem"
+    client_key = STATE_DIR / "key.pem"
+    if client_cert.is_file() and client_key.is_file():
+        try:
+            ctx.load_cert_chain(str(client_cert), str(client_key))
+        except Exception as exc:
+            print(f"[!] Warning: Could not load client TLS cert chain: {exc}", file=sys.stderr)
     if expected_fp:
         # Self-signed P2P certificates are verified immediately post-handshake against the W2P2 SHA-256 pin.
         ctx.check_hostname = False
@@ -2472,6 +2769,7 @@ try:
                     print(f"[-] FATAL: Peer TLS certificate fingerprint mismatch! Expected {expected_fp}, got {actual_fp}")
                     raise ssl.SSLError(f"Certificate fingerprint pinning failed! Expected {expected_fp}, got {actual_fp}")
                 print(f"[+] Verified peer TLS certificate fingerprint: {actual_fp}")
+            print(f"[+] TLS negotiated: {s.version()} / {(s.cipher() or ('?',))[0]}")
             post_handshake = True
             f = s.makefile("rb", buffering=262144)
             disc = plistlib.dumps({"DeviceSupportFlags": 111611}, fmt=plistlib.FMT_BINARY)
@@ -2533,6 +2831,7 @@ try:
                 s.sendall(hdr_bytes)
                 tx_start = time.time()
                 last_emit = 0.0
+                last_term_log = 0.0
                 last_lock_refresh = time.time()
                 last_cancel_check = [0.0]
                 off = 0
@@ -2602,9 +2901,18 @@ try:
                                 last_emit = now
                                 el = max(0.08, now - tx_start)
                                 spd = int(off / el)
-                                eta = int(max(0, tot - off) / max(1, spd))
+                                eta = int(max(0, tot - off) / spd) if (spd > 0 and el >= 0.5 and off >= 65536) else 0
                                 pct = min(99, int((off * 100) / max(1, tot)))
                                 write_progress(True, "Sending", label, min(off, tot), tot, spd, eta, pct, fcount, phase="Sending files", peer_name=peer_name, is_connecting=False)
+                                if now - last_term_log >= 2.0 or off >= tot:
+                                    last_term_log = now
+                                    mb_done = off / (1024 * 1024)
+                                    mb_tot = tot / (1024 * 1024)
+                                    spd_mb = spd / (1024 * 1024)
+                                    eta_label = format_duration(eta)
+                                    eta_part = f", ETA {eta_label}" if eta_label else ""
+                                    print(f"[P2P-Sender] Sending '{label}': {mb_done:.1f} MB / {mb_tot:.1f} MB ({pct}%, {spd_mb:.1f} MB/s{eta_part})")
+                                    sys.stdout.flush()
                 send_dvzip_block(make_odc_hdr(0, 0, "TRAILER!!!", 0))
                 s.sendall(b"0\r\n\r\n")
                 write_progress(True, "Sending", label, tot, tot, 0, 0, 99, fcount, phase="Finalizing transfer on receiver…", peer_name=peer_name, is_connecting=False)

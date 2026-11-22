@@ -410,6 +410,69 @@ class TransportTests(unittest.TestCase):
         self.assertEqual([p.name for p in saved], ["large_clip.mp4"])
         self.assertEqual(saved[0].read_bytes(), payload)
 
+    def test_stream_decompressor_rejects_empty_stored_dvzip_block(self):
+        hdr = struct.pack(">I", 0x80000000)
+        with self.assertRaises(ValueError):
+            self.rx["StreamDecompressor"](self.rx["FixedLengthReader"](io.BytesIO(hdr), len(hdr)))
+
+    def test_stream_decompressor_rejects_excessive_zero_output_blocks(self):
+        # 10 consecutive DVZip deflate blocks containing only zlib empty sync-flush payloads
+        chunks = []
+        for _ in range(10):
+            comp = zlib.compressobj()
+            blk = comp.compress(b"") + comp.flush(zlib.Z_SYNC_FLUSH) + comp.flush()
+            chunks.append(struct.pack(">I", len(blk)) + blk)
+        payload = b"".join(chunks) + struct.pack(">I", 0)
+        dec = self.rx["StreamDecompressor"](self.rx["FixedLengthReader"](io.BytesIO(payload), len(payload)))
+        with self.assertRaises(ValueError):
+            dec.read(64)
+
+    def test_stream_decompressor_rejects_trailing_gzip_garbage(self):
+        body = archive(("ok.txt", b"hello"))
+        gz = gzip.compress(body) + b"TRAILING_GARBAGE" * 16
+        dec = self.rx["StreamDecompressor"](self.rx["FixedLengthReader"](io.BytesIO(gz), len(gz)))
+        with self.assertRaises(ValueError):
+            while dec.read(64):
+                pass
+
+    def test_extract_cpio_truncates_long_utf8_filenames_to_239_bytes(self):
+        long_name = ("é" * 150) + ".txt"  # > 300 UTF-8 bytes
+        dest = self.root / "long_names"
+        dest.mkdir()
+        raw = archive((long_name, b"abc"))
+        stream = self.rx["StreamDecompressor"](self.rx["FixedLengthReader"](io.BytesIO(raw), len(raw)))
+        saved = self.rx["extract_cpio_stream"](stream, dest, fsync_files=False)
+        self.assertEqual(len(saved), 1)
+        self.assertTrue(saved[0].name.endswith(".txt"))
+        self.assertLessEqual(len(saved[0].name.encode("utf-8")), 239)
+
+    def test_append_history_sanitizes_tsv_injection(self):
+        self.rx["append_history"]("FILE", "/tmp/a\tb.txt", 10, "received", "Phone\n999\tURL\tsmb://evil")
+        log_text = (self.root / "received.log").read_text(encoding="utf-8")
+        lines = [ln for ln in log_text.splitlines() if ln]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(lines[0].split("\t")), 6)
+        self.assertNotIn("smb://evil\t", lines[0])
+
+    def test_cleanup_finder_recovery_dir_enforces_age_and_quota(self):
+        rec = self.root / "finder_recovery"
+        rec.mkdir()
+        stale = rec / "transfer-stale"
+        stale.mkdir()
+        (stale / "old.bin").write_bytes(b"a" * 32)
+        os.utime(stale, (1000, 1000))
+        older = rec / "transfer-older"
+        older.mkdir()
+        (older / "d1.bin").write_bytes(b"b" * 100)
+        os.utime(older, (time.time() - 10, time.time() - 10))
+        newer = rec / "transfer-newer"
+        newer.mkdir()
+        (newer / "d2.bin").write_bytes(b"c" * 100)
+        self.rx["cleanup_finder_recovery_dir"](rec, max_age_s=300.0, max_total_bytes=120)
+        self.assertFalse(stale.exists())
+        self.assertFalse(older.exists())
+        self.assertTrue(newer.exists())
+
 
 class RuntimeAssignedPortsTests(unittest.TestCase):
     """Task 3.4: no compiled-in ports; peer ports come from the handshake/session."""
@@ -427,6 +490,24 @@ class RuntimeAssignedPortsTests(unittest.TestCase):
                 ssid="DIRECT-t", interface="en0", cidr="192.168.73.0/24",
                 gatewayIp="192.168.73.1", httpsPort=40123, updatedAt=time.time())))
             self.assertEqual(ns["get_active_p2p_https_port"](), 40123)
+
+    def test_format_duration_and_glidedrop_sh_syntax(self):
+        rx = namespace(0)
+        tx = namespace(1)
+        for mod in (rx, tx):
+            fmt = mod["format_duration"]
+            self.assertEqual(fmt(0), "")
+            self.assertEqual(fmt(-3), "")
+            self.assertEqual(fmt(45), "45s")
+            self.assertEqual(fmt(60), "1m")
+            self.assertEqual(fmt(90), "1m 30s")
+            self.assertEqual(fmt(3600), "1h")
+            self.assertEqual(fmt(3725), "1h 2m")
+        res = subprocess.run(["bash", "-n", str(SOURCE)], capture_output=True, text=True, check=False)
+        self.assertEqual(res.returncode, 0, f"bash -n failed: {res.stderr}")
+        script_text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("resolve_python_bin()", script_text)
+        self.assertIn('PYTHON_BIN="$(resolve_python_bin)"', script_text)
 
 if __name__ == "__main__":
     unittest.main()

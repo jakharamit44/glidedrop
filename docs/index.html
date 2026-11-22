@@ -48,16 +48,16 @@
         "applicationCategory": "UtilitiesApplication",
         "applicationSubCategory": "Peer-to-Peer File Transfer",
         "operatingSystem": "Android 12+, macOS 13+",
-        "softwareVersion": "2.6.0",
+        "softwareVersion": "3.0.7",
         "datePublished": "2026-11-11",
         "license": "https://opensource.org/license/mit",
         "isAccessibleForFree": true,
         "url": "https://jakharamit44.github.io/glidedrop/",
         "image": "https://jakharamit44.github.io/glidedrop/og-image.png",
         "downloadUrl": [
-          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk",
-          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg",
-          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.dmg"
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.apk",
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.pkg",
+          "https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.dmg"
         ],
         "installUrl": "https://github.com/jakharamit44/glidedrop/releases/latest",
         "releaseNotes": "https://github.com/jakharamit44/glidedrop/blob/main/CHANGELOG.md",
@@ -67,7 +67,7 @@
           "Off-grid 5 GHz Wi-Fi Direct transfers at 65+ MB/s with Direct BLE L2CAP fallback",
           "64-bit extended CPIO (070764) streaming for files larger than 8 GiB",
           "ECDH P-256 key exchange, AES-256-GCM credential encryption, and SHA-256 pinned TLS",
-          "Embedded SOCKS5 and HTTP CONNECT proxy on port 1080 to keep macOS online during Wi-Fi Direct transfers",
+          "Embedded SOCKS5 and HTTP CONNECT proxy on a dynamic OS-assigned port to keep macOS online during Wi-Fi Direct transfers",
           "Optional on-device Apple Vision OCR, local Ollama summaries, and Claude API ingestion"
         ],
         "offers": {
@@ -115,7 +115,7 @@
             "name": "Will my Mac lose internet while connected to Wi-Fi Direct?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "During 5 GHz Wi-Fi Direct transfers, Android can run an embedded SOCKS5 and HTTP CONNECT proxy on port 1080 (under Settings -> Mac Internet Sharing Proxy) to share its active mobile data or upstream internet connection. macOS snapshots your previous proxy settings, applies the temporary proxy without sudo, and restores both your proxy config and home Wi-Fi once done."
+              "text": "During 5 GHz Wi-Fi Direct transfers, Android can run an embedded SOCKS5 and HTTP CONNECT proxy on a dynamic OS-assigned port (under Settings -> Mac Internet Sharing Proxy) to share its active mobile data or upstream internet connection. macOS snapshots your previous proxy settings, applies the temporary proxy without sudo, and restores both your proxy config and home Wi-Fi once done."
             }
           },
           {
@@ -1077,7 +1077,7 @@
       <div class="container">
         <div class="hero-grid">
           <div>
-            <div class="release-pill" id="hero-release-badge">Release v2.6.0 (Public Beta)</div>
+            <div class="release-pill" id="hero-release-badge">Release v3.0.7 (Public Beta)</div>
             <h1>Open-Source AirDrop Alternative for Android and Mac</h1>
             <p class="hero-lead">
               Send files directly between Android and Mac without a shared Wi-Fi router, USB cable, cloud account, or
@@ -1085,11 +1085,11 @@
             </p>
             <div class="cta-group">
               <a id="hero-apk-btn" class="btn btn-primary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.apk">
                 Download Android APK
               </a>
               <a id="hero-pkg-btn" class="btn btn-secondary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.pkg">
                 Download macOS PKG
               </a>
               <a class="btn btn-secondary" href="https://github.com/jakharamit44/glidedrop">
@@ -1128,7 +1128,7 @@
               <div class="step-num">3</div>
               <div>
                 <strong>5 GHz Wi-Fi Direct Streaming</strong>
-                <p>Files stream over HTTPS with 64-bit CPIO (070764) support above 8 GiB and an optional port 1080
+                <p>Files stream over HTTPS with 64-bit CPIO (070764) support above 8 GiB and an optional dynamic-port
                   internet proxy.</p>
               </div>
             </div>
@@ -1153,7 +1153,7 @@
             <div class="metric-lbl">64-bit CPIO 070764 for 10 GB+ files</div>
           </div>
           <div class="spec-item">
-            <div class="metric-val">Port 1080</div>
+            <div class="metric-val">Dynamic Port</div>
             <div class="metric-lbl">SOCKS5 / HTTP proxy keeps Mac online</div>
           </div>
           <div class="spec-item">
@@ -1166,7 +1166,7 @@
 
     <section id="downloads">
       <div class="container">
-        <h2 id="downloads-heading">Download Release v2.6.0</h2>
+        <h2 id="downloads-heading">Download Release v3.0.7</h2>
         <p class="section-intro">
           Pre-built binaries are published on GitHub Releases with SHA-256 checksums. Both apps run natively without
           third-party transfer servers.
@@ -1184,8 +1184,8 @@
             </div>
             <div class="dl-actions">
               <a id="dl-apk-btn" class="btn btn-primary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.apk">
-                GlideDrop-v2.6.0.apk
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.apk">
+                GlideDrop-v3.0.7.apk
               </a>
             </div>
           </article>
@@ -1201,12 +1201,12 @@
             </div>
             <div class="dl-actions">
               <a id="dl-pkg-btn" class="btn btn-primary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.pkg">
-                GlideDrop-v2.6.0.pkg (Recommended)
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.pkg">
+                GlideDrop-v3.0.7.pkg (Recommended)
               </a>
               <a id="dl-dmg-btn" class="btn btn-secondary"
-                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v2.6.0.dmg">
-                GlideDrop-v2.6.0.dmg
+                href="https://github.com/jakharamit44/glidedrop/releases/latest/download/GlideDrop-v3.0.7.dmg">
+                GlideDrop-v3.0.7.dmg
               </a>
             </div>
           </article>
@@ -1249,7 +1249,7 @@
           </article>
           <article class="spec-cell">
             <h3>Stay Online on Mac</h3>
-            <p>Android's embedded SOCKS5 and HTTP CONNECT proxy on port 1080 routes Mac traffic over cellular or
+            <p>Android's embedded SOCKS5 and HTTP CONNECT proxy on a dynamic OS-assigned port routes Mac traffic over cellular or
               upstream Wi-Fi while Wi-Fi Direct is active.</p>
           </article>
           <article class="spec-cell">
@@ -1438,8 +1438,8 @@
           </details>
           <details class="faq-item">
             <summary>Will my Mac lose internet while connected to Wi-Fi Direct?</summary>
-            <p>During 5 GHz Wi-Fi Direct transfers, Android can run an embedded SOCKS5 and HTTP CONNECT proxy on port
-              1080 (under Settings &rarr; Mac Internet Sharing Proxy) to share its active mobile data or upstream
+            <p>During 5 GHz Wi-Fi Direct transfers, Android can run an embedded SOCKS5 and HTTP CONNECT proxy on a dynamic
+              OS-assigned port (under Settings &rarr; Mac Internet Sharing Proxy) to share its active mobile data or upstream
               internet connection. macOS snapshots your previous proxy settings, applies the temporary proxy without
               sudo, and restores both your proxy config and home Wi-Fi once done.</p>
           </details>
@@ -1458,7 +1458,7 @@
           </details>
           <details class="faq-item">
             <summary>How do I avoid macOS Gatekeeper warnings when installing?</summary>
-            <p>Install with <code id="faq-pkg-name">GlideDrop-v2.6.0.pkg</code>, which installs into
+            <p>Install with <code id="faq-pkg-name">GlideDrop-v3.0.7.pkg</code>, which installs into
               <code>/Applications</code> and runs <code>xattr -cr</code> during setup. If you downloaded the
               <code>.dmg</code>, run the bundled Gatekeeper helper script or run
               <code>xattr -cr "/Applications/GlideDrop.app"</code> in Terminal.</p>
@@ -1476,7 +1476,7 @@
 
   <footer>
     <div class="container footer-grid">
-      <div id="footer-version-text">GlideDrop v2.6.0 &middot; Open source under the MIT License</div>
+      <div id="footer-version-text">GlideDrop v3.0.7 &middot; Open source under the MIT License</div>
       <div class="footer-links">
         <a href="https://github.com/jakharamit44/glidedrop">GitHub</a>
         <a href="https://github.com/jakharamit44/glidedrop/releases">Releases</a>
@@ -1566,10 +1566,14 @@
         var baseDownload = 'https://github.com/' + REPO + '/releases/download/' + encodeURIComponent(rawTag);
         var assets = Array.isArray(release.assets) ? release.assets : [];
 
+        function isTrustedReleaseUrl(url) {
+          return typeof url === 'string' && url.indexOf('https://github.com/' + REPO + '/releases/download/') === 0;
+        }
+
         function findAsset(ext, exactName) {
           for (var i = 0; i < assets.length; i++) {
             var asset = assets[i];
-            if (!asset || !asset.name || !asset.browser_download_url) continue;
+            if (!asset || !asset.name || !isTrustedReleaseUrl(asset.browser_download_url)) continue;
             if (exactName && asset.name === exactName) {
               return { name: asset.name, url: asset.browser_download_url };
             }

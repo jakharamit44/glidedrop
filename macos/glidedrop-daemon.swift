@@ -396,9 +396,18 @@ func readPortFile(_ name: String, stateDir: URL = STATE_DIR) -> Int? {
     return val
 }
 
+func ensurePrivateStateDir(_ dir: URL = STATE_DIR) {
+    try? FileManager.default.createDirectory(
+        at: dir,
+        withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700]
+    )
+    _ = chmod(dir.path, 0o700)
+}
+
 func writeAwdlBridgePortFile(port: Int, stateDir: URL = STATE_DIR) {
     guard (1...65535).contains(port) else { return }
-    try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+    ensurePrivateStateDir(stateDir)
     guard let data = "\(port)\n".data(using: .utf8) else { return }
     writeAtomicPrivateFile(data: data, to: stateDir.appendingPathComponent("awdl_bridge_port"))
 }
@@ -407,8 +416,43 @@ func isAllowedAwdlInterfaceNames(_ names: [String]) -> Bool {
     return names.contains { $0 == "awdl0" || $0.hasPrefix("awdl") }
 }
 
-func isAllowedAwdlEndpoint(_ endpoint: NWEndpoint?) -> Bool {
-    guard let ep = endpoint else { return true }
+func canonicalLinkLocalIpv6Data(_ raw: Data) -> Data? {
+    guard raw.count == 16 else { return nil }
+    guard raw[raw.startIndex] == 0xFE && (raw[raw.startIndex + 1] & 0xC0) == 0x80 else {
+        return nil
+    }
+    var normalized = Data(raw)
+    // Clear KAME embedded interface scope bytes [2..3] so getifaddrs and NWEndpoint addresses compare identically.
+    normalized[2] = 0
+    normalized[3] = 0
+    return normalized
+}
+
+func localAwdlLinkLocalIpv6Addresses() -> Set<Data> {
+    var result = Set<Data>()
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return result }
+    defer { freeifaddrs(ifaddr) }
+    for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
+        guard let sa = ptr.pointee.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET6) else { continue }
+        let flags = Int32(ptr.pointee.ifa_flags)
+        guard (flags & (IFF_UP | IFF_LOOPBACK)) == IFF_UP else { continue }
+        let ifName = String(cString: ptr.pointee.ifa_name)
+        guard ifName.hasPrefix("awdl") else { continue }
+        var sin6 = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+        let raw = withUnsafeBytes(of: &sin6.sin6_addr) { Data($0) }
+        if let canon = canonicalLinkLocalIpv6Data(raw) {
+            result.insert(canon)
+        }
+    }
+    return result
+}
+
+func isAllowedAwdlEndpoint(
+    _ endpoint: NWEndpoint?,
+    allowedLocalAddresses: Set<Data>? = nil
+) -> Bool {
+    guard let ep = endpoint else { return false }
     switch ep {
     case .hostPort(let host, _):
         switch host {
@@ -419,17 +463,20 @@ func isAllowedAwdlEndpoint(_ endpoint: NWEndpoint?) -> Bool {
             if let ifName = addr.interface?.name, !ifName.hasPrefix("awdl") {
                 return false
             }
-            return true
-        case .name(_, let iface):
-            if let ifName = iface?.name, !ifName.hasPrefix("awdl") {
-                return false
+            if let allowed = allowedLocalAddresses {
+                guard let canon = canonicalLinkLocalIpv6Data(addr.rawValue),
+                      allowed.contains(canon) else {
+                    return false
+                }
             }
             return true
+        case .name(_, _):
+            return false
         @unknown default:
-            return true
+            return false
         }
     default:
-        return true
+        return false
     }
 }
 
@@ -440,14 +487,32 @@ func readFinderProxySockPath(stateDir: URL = STATE_DIR) -> String {
 func ensureLocalMacEndpointFiles() {
     let pubPemPath = STATE_DIR.appendingPathComponent("cert.pem")
     let privPemPath = STATE_DIR.appendingPathComponent("key.pem")
+    ensurePrivateStateDir(STATE_DIR)
     if !FileManager.default.fileExists(atPath: pubPemPath.path) || !FileManager.default.fileExists(atPath: privPemPath.path) {
-        try? FileManager.default.createDirectory(at: STATE_DIR, withIntermediateDirectories: true)
         _ = runProcessCapture("/usr/bin/openssl", [
             "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
             "-keyout", privPemPath.path, "-out", pubPemPath.path,
             "-days", "3650", "-nodes", "-subj", "/CN=glidedrop"
         ])
     }
+    if FileManager.default.fileExists(atPath: privPemPath.path) {
+        _ = chmod(privPemPath.path, 0o600)
+    }
+    if FileManager.default.fileExists(atPath: pubPemPath.path) {
+        _ = chmod(pubPemPath.path, 0o644)
+    }
+}
+
+func loadLocalMacCertDer(stateDir: URL = STATE_DIR) -> Data? {
+    let pubPemPath = stateDir.appendingPathComponent("cert.pem")
+    guard let pemStr = try? String(contentsOf: pubPemPath, encoding: .utf8) else { return nil }
+    let b64 = pemStr.components(separatedBy: .newlines)
+        .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+        .joined()
+    guard let der = Data(base64Encoded: b64, options: .ignoreUnknownCharacters), !der.isEmpty else {
+        return nil
+    }
+    return der
 }
 
 func computeLocalMacSha256Pin() -> String {
@@ -567,13 +632,40 @@ struct W2p2Request {
     let pubB64: String
     let tlsFingerprint: String
     let sessionId: Data?
+    let certDerB64: String?
+    let identitySigB64: String?
+
+    init(
+        version: Int,
+        pubB64: String,
+        tlsFingerprint: String,
+        sessionId: Data?,
+        certDerB64: String? = nil,
+        identitySigB64: String? = nil
+    ) {
+        self.version = version
+        self.pubB64 = pubB64
+        self.tlsFingerprint = tlsFingerprint
+        self.sessionId = sessionId
+        self.certDerB64 = certDerB64
+        self.identitySigB64 = identitySigB64
+    }
 }
 
 /// Parses the tab-separated body of a W2P2 request (everything after the magic).
 func parseW2p2Request(_ body: String) -> W2p2Request {
     let parts = body.split(separator: "\t").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     if parts.count >= 4, let v = Int(parts[0]), v >= 3 {
-        return W2p2Request(version: v, pubB64: parts[1], tlsFingerprint: parts[2], sessionId: dataFromHex(parts[3]))
+        let certDerB64 = parts.count >= 6 ? parts[4] : nil
+        let identitySigB64 = parts.count >= 6 ? parts[5] : nil
+        return W2p2Request(
+            version: v,
+            pubB64: parts[1],
+            tlsFingerprint: parts[2],
+            sessionId: dataFromHex(parts[3]),
+            certDerB64: certDerB64,
+            identitySigB64: identitySigB64
+        )
     }
     if parts.count >= 3, parts[0] == "2" || parts[0] == "1" {
         return W2p2Request(version: Int(parts[0]) ?? 1, pubB64: parts[1], tlsFingerprint: parts[2], sessionId: nil)
@@ -582,6 +674,26 @@ func parseW2p2Request(_ body: String) -> W2p2Request {
         return W2p2Request(version: 1, pubB64: parts[0], tlsFingerprint: parts[1], sessionId: nil)
     }
     return W2p2Request(version: 1, pubB64: parts.first ?? "", tlsFingerprint: "", sessionId: nil)
+}
+
+func signW2p2IdentityProof(
+    version: Int,
+    pubB64: String,
+    tlsFp: String,
+    sessionIdHex: String,
+    stateDir: URL = STATE_DIR
+) -> (certDerB64: String, sigB64: String)? {
+    let privPemPath = stateDir.appendingPathComponent("key.pem")
+    guard let certDer = loadLocalMacCertDer(stateDir: stateDir),
+          let keyPem = try? String(contentsOf: privPemPath, encoding: .utf8),
+          let signingKey = try? P256.Signing.PrivateKey(pemRepresentation: keyPem) else {
+        return nil
+    }
+    let msg = "GlideDrop-W2P2-IdProof\n\(version)\n\(pubB64)\n\(normalizeSha256Fingerprint(tlsFp))\n\(sessionIdHex.lowercased())"
+    guard let sig = try? signingKey.signature(for: Data(msg.utf8)) else {
+        return nil
+    }
+    return (certDer.base64EncodedString(), sig.derRepresentation.base64EncodedString())
 }
 
 func dataFromHex(_ hex: String) -> Data? {
@@ -763,11 +875,11 @@ let REPO_ROOT = resolveRepoRoot()
 let STATE_DIR: URL = {
     if let env = ProcessInfo.processInfo.environment["GLIDEDROP_STATE_DIR"], !env.isEmpty {
         let u = URL(fileURLWithPath: env)
-        try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+        ensurePrivateStateDir(u)
         return u
     }
     let u = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".glidedrop")
-    try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+    ensurePrivateStateDir(u)
     return u
 }()
 let SCRIPT_PATH: String = {
@@ -850,6 +962,19 @@ func formatTransferSpeed(_ bps: Int64) -> String {
     return "\(formatByteSize(bps))/s"
 }
 
+func formatMacDuration(_ seconds: Int64) -> String {
+    if seconds <= 0 { return "" }
+    if seconds < 60 { return "\(seconds)s" }
+    if seconds < 3600 {
+        let m = seconds / 60
+        let s = seconds % 60
+        return s == 0 ? "\(m)m" : "\(m)m \(s)s"
+    }
+    let h = seconds / 3600
+    let m = (seconds % 3600) / 60
+    return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+}
+
 func writeProgressJson(
     active: Bool,
     direction: String = "",
@@ -865,7 +990,6 @@ func writeProgressJson(
     isConnecting: Bool = false
 ) {
     let pf = STATE_DIR.appendingPathComponent("transfer_progress.json")
-    let tmp = STATE_DIR.appendingPathComponent("transfer_progress.json.tmp")
     if !active {
         try? FileManager.default.removeItem(at: pf)
         return
@@ -886,14 +1010,52 @@ func writeProgressJson(
         "updatedAt": Date().timeIntervalSince1970
     ]
     if let data = try? JSONSerialization.data(withJSONObject: dict, options: []) {
-        try? data.write(to: tmp)
-        _ = try? FileManager.default.replaceItemAt(pf, withItemAt: tmp)
+        ensurePrivateStateDir(STATE_DIR)
+        writeAtomicPrivateFile(data: data, to: pf)
     }
 }
 
+func sanitizeHistoryField(_ raw: String) -> String {
+    var scalars = String.UnicodeScalarView()
+    scalars.reserveCapacity(raw.unicodeScalars.count)
+    for scalar in raw.unicodeScalars {
+        if scalar.value < 0x20 || (0x7F...0x9F).contains(scalar.value) {
+            scalars.append(" ")
+        } else if scalar.properties.generalCategory == .format {
+            continue
+        } else {
+            scalars.append(scalar)
+        }
+    }
+    return String(scalars)
+        .replacingOccurrences(of: "\t", with: " ")
+        .replacingOccurrences(of: "\n", with: " ")
+        .replacingOccurrences(of: "\r", with: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func parseSafeExternalWebUrl(_ raw: String) -> URL? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty,
+          trimmed.count <= 4096,
+          !trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F || CharacterSet.whitespacesAndNewlines.contains($0) }),
+          let u = URL(string: trimmed),
+          let scheme = u.scheme?.lowercased(),
+          (scheme == "http" || scheme == "https"),
+          let host = u.host, !host.isEmpty else {
+        return nil
+    }
+    return u
+}
+
 func appendReceivedLog(kind: String, value: String, sizeBytes: Int64 = 0, direction: String = "received", peerName: String = "Nearby Peer") {
+    ensurePrivateStateDir(STATE_DIR)
     let rxLog = STATE_DIR.appendingPathComponent("received.log")
-    let line = "\(Int(Date().timeIntervalSince1970))\t\(kind)\t\(value)\t\(sizeBytes)\t\(direction)\t\(peerName)\n"
+    let cleanKind = sanitizeHistoryField(kind)
+    let cleanVal = sanitizeHistoryField(value)
+    let cleanDir = sanitizeHistoryField(direction)
+    let cleanPeer = sanitizeHistoryField(peerName).isEmpty ? "Nearby Peer" : sanitizeHistoryField(peerName)
+    let line = "\(Int(Date().timeIntervalSince1970))\t\(cleanKind)\t\(cleanVal)\t\(sizeBytes)\t\(cleanDir)\t\(cleanPeer)\n"
     if let data = line.data(using: .utf8) {
         if FileManager.default.fileExists(atPath: rxLog.path),
            let fh = try? FileHandle(forWritingTo: rxLog) {
@@ -901,8 +1063,9 @@ func appendReceivedLog(kind: String, value: String, sizeBytes: Int64 = 0, direct
             fh.write(data)
             try? fh.close()
         } else {
-            try? data.write(to: rxLog)
+            _ = FileManager.default.createFile(atPath: rxLog.path, contents: data, attributes: [.posixPermissions: 0o600])
         }
+        _ = chmod(rxLog.path, 0o600)
     }
 }
 
@@ -1032,6 +1195,7 @@ func loadMacSettings() -> (autoAccept: Bool, visible: Bool, deviceName: String, 
 func saveMacSettings(autoAccept: Bool, visible: Bool, deviceName: String, themeMode: String? = nil) {
     let resolvedTheme = themeMode ?? loadMacSettings().themeMode
     let sf = STATE_DIR.appendingPathComponent("settings.json")
+    ensurePrivateStateDir(STATE_DIR)
     let dict: [String: Any] = [
         "autoAccept": autoAccept,
         "visible": visible,
@@ -1039,7 +1203,7 @@ func saveMacSettings(autoAccept: Bool, visible: Bool, deviceName: String, themeM
         "themeMode": resolvedTheme
     ]
     if let d = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
-        try? d.write(to: sf, options: [.atomic])
+        writeAtomicPrivateFile(data: d, to: sf)
     }
 }
 
@@ -1047,6 +1211,8 @@ func isStreamAborted(_ stream: InputStream?) -> Bool {
     guard let st = stream?.streamStatus else { return false }
     return st == .atEnd || st == .closed || st == .error
 }
+
+private let macUserAcceptLock = NSLock()
 
 func waitForMacUserAccept(
     senderName: String,
@@ -1058,6 +1224,10 @@ func waitForMacUserAccept(
     let settings = loadMacSettings()
     if settings.autoAccept && !forcePrompt { return true }
 
+    macUserAcceptLock.lock()
+    defer { macUserAcceptLock.unlock() }
+
+    ensurePrivateStateDir(STATE_DIR)
     let reqId = UUID().uuidString
     let askFile = STATE_DIR.appendingPathComponent("pending_ask.json")
     let decFile = STATE_DIR.appendingPathComponent("ask_decision.json")
@@ -1071,7 +1241,7 @@ func waitForMacUserAccept(
         "timestamp": Date().timeIntervalSince1970
     ]
     if let d = try? JSONSerialization.data(withJSONObject: payload) {
-        try? d.write(to: askFile, options: [.atomic])
+        writeAtomicPrivateFile(data: d, to: askFile)
     }
     DistributedNotificationCenter.default().postNotificationName(
         SHOW_UI_NOTIFICATION,
@@ -1286,18 +1456,26 @@ func resumeCloudflareWarpIfNeeded() {
     fflush(stdout)
 }
 
+private let wifiInterfaceCacheLock = NSLock()
 private var _cachedWifiInterface: String? = nil
 
 func getWifiInterfaceName() -> String {
+    wifiInterfaceCacheLock.lock()
     if let cached = _cachedWifiInterface, !cached.isEmpty {
+        wifiInterfaceCacheLock.unlock()
         return cached
     }
+    wifiInterfaceCacheLock.unlock()
     if let name = CWWiFiClient.shared().interface()?.interfaceName, !name.isEmpty {
+        wifiInterfaceCacheLock.lock()
         _cachedWifiInterface = name
+        wifiInterfaceCacheLock.unlock()
         return name
     }
     if let names = CWWiFiClient.shared().interfaceNames(), let first = names.first, !first.isEmpty {
+        wifiInterfaceCacheLock.lock()
         _cachedWifiInterface = first
+        wifiInterfaceCacheLock.unlock()
         return first
     }
     let (_, out) = runProcessCapture("/usr/sbin/networksetup", ["-listallhardwareports"])
@@ -1311,7 +1489,9 @@ func getWifiInterfaceName() -> String {
         } else if isWifiPort && trimmed.hasPrefix("Device:") {
             let dev = trimmed.replacingOccurrences(of: "Device:", with: "").trimmingCharacters(in: .whitespaces)
             if !dev.isEmpty {
+                wifiInterfaceCacheLock.lock()
                 _cachedWifiInterface = dev
+                wifiInterfaceCacheLock.unlock()
                 return dev
             }
         }
@@ -1407,6 +1587,7 @@ func isLocationAuthorizedForWifiNames() -> Bool {
 /// Requests Location authorization (required for macOS to reveal SSID/BSSID) before the first join.
 /// Returns true when authorized. If denied or undetermined after the wait, logs where to enable it;
 /// the join still proceeds because association is confirmed from interface state.
+private let locationPromptLock = NSLock()
 private var locationPromptRequested = false
 
 @discardableResult
@@ -1417,8 +1598,11 @@ func requestLocationAuthorizationForWifi(timeout: TimeInterval = 8.0) -> Bool {
     // Ask at most once per process, and never again once the user has decided (denied/restricted).
     guard Bundle.main.bundleIdentifier != nil else { return false }
     let status = CLLocationManager().authorizationStatus
-    if status == .notDetermined && !locationPromptRequested {
-        locationPromptRequested = true
+    locationPromptLock.lock()
+    let shouldAsk = (status == .notDetermined && !locationPromptRequested)
+    if shouldAsk { locationPromptRequested = true }
+    locationPromptLock.unlock()
+    if shouldAsk {
         DispatchQueue.main.async {
             if locationAuthManager == nil { locationAuthManager = CLLocationManager() }
             locationAuthManager?.requestWhenInUseAuthorization()
@@ -1465,16 +1649,25 @@ func saveCurrentWifiSsid() {
         fflush(stdout)
     } else {
         setSavedHomeWifiSsid(ssid)
-        try? ssid.write(to: PREV_WIFI_FILE, atomically: true, encoding: .utf8)
+        ensurePrivateStateDir(STATE_DIR)
+        if let d = ssid.data(using: .utf8) {
+            writeAtomicPrivateFile(data: d, to: PREV_WIFI_FILE)
+        }
         print("[BLE-Daemon] Preserved home Wi-Fi network: '\(ssid)'")
         fflush(stdout)
     }
 }
 
+private let wifiServiceCacheLock = NSLock()
 private var _cachedWifiServiceName: String?
 
 func getWifiServiceName() -> String {
-    if let cached = _cachedWifiServiceName { return cached }
+    wifiServiceCacheLock.lock()
+    if let cached = _cachedWifiServiceName {
+        wifiServiceCacheLock.unlock()
+        return cached
+    }
+    wifiServiceCacheLock.unlock()
     let iface = getWifiInterfaceName()
     let (_, out) = runProcessCapture("/usr/sbin/networksetup", ["-listnetworkserviceorder"])
     let lines = out.components(separatedBy: "\n")
@@ -1491,7 +1684,9 @@ func getWifiServiceName() -> String {
             }
         } else if trimmed.contains("Device: \(iface)") {
             if !lastService.isEmpty {
+                wifiServiceCacheLock.lock()
                 _cachedWifiServiceName = lastService
+                wifiServiceCacheLock.unlock()
                 return lastService
             }
         }
@@ -1560,7 +1755,21 @@ func parseBypassDomainsOutput(_ output: String) -> [String] {
     return domains
 }
 
-private var proxyEnabledInCurrentProcess = false
+private let proxyStateLock = NSLock()
+private var _proxyEnabledInCurrentProcess = false
+
+func setProxyEnabledInCurrentProcess(_ val: Bool) {
+    proxyStateLock.lock()
+    _proxyEnabledInCurrentProcess = val
+    proxyStateLock.unlock()
+}
+
+func isProxyEnabledInCurrentProcess() -> Bool {
+    proxyStateLock.lock()
+    defer { proxyStateLock.unlock() }
+    return _proxyEnabledInCurrentProcess
+}
+
 private let activeChildTxLock = NSLock()
 private var activeChildTxProcess: Process?
 
@@ -1691,7 +1900,7 @@ func enableMacInternetProxy(host: String, port: Int, cidr: String? = nil) {
     }
 
     withProxyStateFileLock {
-        proxyEnabledInCurrentProcess = true
+        setProxyEnabledInCurrentProcess(true)
         let service = getWifiServiceName()
 
         // 1. Snapshot previous proxy settings if not already snapshotted
@@ -1710,7 +1919,8 @@ func enableMacInternetProxy(host: String, port: Int, cidr: String? = nil) {
                 appliedTarget: AppliedProxyTarget(host: cleanHost, port: port, cidr: sessionCidr)
             )
             if let data = try? JSONEncoder().encode(saved) {
-                try? data.write(to: PREV_PROXY_FILE, options: .atomic)
+                ensurePrivateStateDir(STATE_DIR)
+                writeAtomicPrivateFile(data: data, to: PREV_PROXY_FILE)
                 print("[BLE-Daemon] Snapshotted existing proxy settings for \(service) to \(PREV_PROXY_FILE.lastPathComponent)")
                 fflush(stdout)
             }
@@ -1754,7 +1964,7 @@ func enableMacInternetProxy(host: String, port: Int, cidr: String? = nil) {
 
 func disableMacInternetProxy() {
     withProxyStateFileLock {
-        defer { proxyEnabledInCurrentProcess = false }
+        defer { setProxyEnabledInCurrentProcess(false) }
         let defaultService = getWifiServiceName()
         var targetService = defaultService
         let activeSession = loadActiveP2pSession()
@@ -1830,123 +2040,162 @@ func disableMacInternetProxy() {
     }
 }
 
-func restoreMacInternetWifi(ssid: String = "DIRECT-") {
-    let activeSession = loadActiveP2pSession()
-    disableMacInternetProxy()
-    try? FileManager.default.removeItem(at: LAN_FALLBACK_FILE)
-    try? FileManager.default.removeItem(at: STATE_DIR.appendingPathComponent("pinned_peer_tls_fingerprint.txt"))
-    clearP2pSessionTokens()
-    clearOutgoingP2pToken()
+private let wifiRestoreMutex = NSLock()
 
-    let iface = getWifiInterfaceName()
-    // 1. ALWAYS unconditionally remove any ephemeral P2P network from preferred list so macOS never stays stuck or reconnects to it
-    let (_, prefOut) = runProcessCapture("/usr/sbin/networksetup", ["-listpreferredwirelessnetworks", iface])
-    for net in prefOut.components(separatedBy: "\n") {
-        let trimmed = net.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("DIRECT-") {
-            _ = runProcessCapture("/usr/sbin/networksetup", ["-removepreferredwirelessnetwork", iface, trimmed])
+func withWifiRestoreLock<T>(_ body: () -> T) -> T {
+    wifiRestoreMutex.lock()
+    defer { wifiRestoreMutex.unlock() }
+    ensurePrivateStateDir(STATE_DIR)
+    let lockPath = STATE_DIR.appendingPathComponent("wifi_restore.lock").path
+    let fd = open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW, 0o600)
+    if fd >= 0 {
+        flock(fd, LOCK_EX)
+        defer {
+            flock(fd, LOCK_UN)
+            close(fd)
+        }
+        return body()
+    }
+    return body()
+}
+
+func resolveRestorableHomeWifiSsid(
+    inMemorySsid: String = getSavedHomeWifiSsid(),
+    prevWifiFile: URL = PREV_WIFI_FILE
+) -> String {
+    let cleanMem = inMemorySsid.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !cleanMem.isEmpty && !cleanMem.hasPrefix("DIRECT-") && !cleanMem.hasPrefix("-") {
+        return cleanMem
+    }
+    if let diskRaw = try? String(contentsOf: prevWifiFile, encoding: .utf8) {
+        let cleanDisk = diskRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanDisk.isEmpty && !cleanDisk.hasPrefix("DIRECT-") && !cleanDisk.hasPrefix("-") {
+            return cleanDisk
         }
     }
-    if ssid.hasPrefix("DIRECT-") { forgetWifiDirectProfile(iface: iface, ssid: ssid) }
+    return ""
+}
 
-    func wifiHasNormalIpv4() -> Bool {
-        let rawSsid = currentRawWifiSsid()
-        if rawSsid.hasPrefix("DIRECT-") { return false }
-        let sessionCidr = activeSession?.cidr ?? loadActiveP2pSession()?.cidr
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return false }
-        defer { freeifaddrs(ifaddr) }
-        for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
-            let flags = Int32(ptr.pointee.ifa_flags)
-            if (flags & (IFF_UP|IFF_RUNNING|IFF_LOOPBACK)) == (IFF_UP|IFF_RUNNING) {
-                let name = String(cString: ptr.pointee.ifa_name)
-                if name == iface {
-                    guard let sa = ptr.pointee.ifa_addr else { continue }
-                    if sa.pointee.sa_family == UInt8(AF_INET) {
-                        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                        if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
-                            let ip = String(cString: hostname)
-                            if isNormalWifiIpv4(ip, activeP2pCidr: sessionCidr, rawWifiSsid: rawSsid) {
-                                return true
+func restoreMacInternetWifi(ssid: String = "DIRECT-") {
+    withWifiRestoreLock {
+        let activeSession = loadActiveP2pSession()
+        disableMacInternetProxy()
+        try? FileManager.default.removeItem(at: LAN_FALLBACK_FILE)
+        try? FileManager.default.removeItem(at: STATE_DIR.appendingPathComponent("pinned_peer_tls_fingerprint.txt"))
+        clearP2pSessionTokens()
+        clearOutgoingP2pToken()
+
+        let iface = getWifiInterfaceName()
+        // 1. ALWAYS unconditionally remove any ephemeral P2P network from preferred list and Keychain
+        let (_, prefOut) = runProcessCapture("/usr/sbin/networksetup", ["-listpreferredwirelessnetworks", iface])
+        for net in prefOut.components(separatedBy: "\n") {
+            let trimmed = net.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("DIRECT-") {
+                forgetWifiDirectProfile(iface: iface, ssid: trimmed)
+            }
+        }
+        if ssid.hasPrefix("DIRECT-") && ssid != "DIRECT-" {
+            forgetWifiDirectProfile(iface: iface, ssid: ssid)
+        }
+
+        func wifiHasNormalIpv4() -> Bool {
+            let rawSsid = currentRawWifiSsid()
+            if rawSsid.hasPrefix("DIRECT-") { return false }
+            let sessionCidr = activeSession?.cidr ?? loadActiveP2pSession()?.cidr
+            var ifaddr: UnsafeMutablePointer<ifaddrs>?
+            guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return false }
+            defer { freeifaddrs(ifaddr) }
+            for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+                let flags = Int32(ptr.pointee.ifa_flags)
+                if (flags & (IFF_UP|IFF_RUNNING|IFF_LOOPBACK)) == (IFF_UP|IFF_RUNNING) {
+                    let name = String(cString: ptr.pointee.ifa_name)
+                    if name == iface {
+                        guard let sa = ptr.pointee.ifa_addr else { continue }
+                        if sa.pointee.sa_family == UInt8(AF_INET) {
+                            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                                let ip = String(cString: hostname)
+                                if isNormalWifiIpv4(ip, activeP2pCidr: sessionCidr, rawWifiSsid: rawSsid) {
+                                    return true
+                                }
                             }
                         }
                     }
                 }
             }
+            return false
         }
-        return false
-    }
 
-    // 2. Check if iface is already back on normal Wi-Fi or was never on P2P
-    let curSsid = currentRawWifiSsid()
-    let onP2p = curSsid.hasPrefix("DIRECT-") || !currentWifiP2pIp(matchingGateway: activeSession?.gatewayIp, matchingCidr: activeSession?.cidr).isEmpty
-    let savedSsid = getSavedHomeWifiSsid().trimmingCharacters(in: .whitespacesAndNewlines)
-    let hasSavedWifiState = !savedSsid.isEmpty || FileManager.default.fileExists(atPath: PREV_WIFI_FILE.path)
-    if !onP2p && (wifiHasNormalIpv4() || !hasSavedWifiState) {
-        print("[BLE-Daemon] \(iface) already on normal Wi-Fi ('\(curSsid)'). P2P cleanup completed.")
-        fflush(stdout)
-        setSavedHomeWifiSsid("")
-        try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
-        clearActiveP2pSession()
-        resumeCloudflareWarpIfNeeded()
-        return
-    }
-
-    if wifiHasNormalIpv4() && !onP2p {
-        print("[BLE-Daemon] \(iface) connected to normal Wi-Fi. P2P removed from preferred list.")
-        fflush(stdout)
-        setSavedHomeWifiSsid("")
-        try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
-        clearActiveP2pSession()
-        resumeCloudflareWarpIfNeeded()
-        return
-    }
-
-    print("[BLE-Daemon] Restoring Mac Internet Wi-Fi (disconnecting P2P on \(iface))...")
-    fflush(stdout)
-
-    // 3. Resolve target home network to restore
-    // Only a network recorded from reliable data is restored by name; never guess from the preferred list.
-    let targetSsid = (!savedSsid.isEmpty && !savedSsid.hasPrefix("DIRECT-") && !savedSsid.hasPrefix("-")) ? savedSsid : ""
-
-    // 4. Disassociate iface using CoreWLAN to cleanly detach from P2P when still on P2P
-    if onP2p {
-        if let cwIface = CWWiFiClient.shared().interface(withName: iface) ?? CWWiFiClient.shared().interface() {
-            cwIface.disassociate()
+        // 2. Check if iface is already back on normal Wi-Fi or was never on P2P
+        let curSsid = currentRawWifiSsid()
+        let onP2p = curSsid.hasPrefix("DIRECT-") || !currentWifiP2pIp(matchingGateway: activeSession?.gatewayIp, matchingCidr: activeSession?.cidr).isEmpty
+        let savedSsid = resolveRestorableHomeWifiSsid()
+        let hasSavedWifiState = !savedSsid.isEmpty || FileManager.default.fileExists(atPath: PREV_WIFI_FILE.path)
+        if !onP2p && (wifiHasNormalIpv4() || !hasSavedWifiState) {
+            print("[BLE-Daemon] \(iface) already on normal Wi-Fi ('\(curSsid)'). P2P cleanup completed.")
+            fflush(stdout)
+            setSavedHomeWifiSsid("")
+            try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
+            clearActiveP2pSession()
+            resumeCloudflareWarpIfNeeded()
+            return
         }
-        Thread.sleep(forTimeInterval: 0.5)
-    }
 
-    // 5. If target network is known and not yet reconnected, reassociate
-    let activeNow = currentWifiSsid()
-    if activeNow.isEmpty && !wifiHasNormalIpv4() {
-        if !targetSsid.isEmpty {
-            print("[BLE-Daemon] Fast-reassociating \(iface) to home Wi-Fi '\(targetSsid)'...")
+        if wifiHasNormalIpv4() && !onP2p {
+            print("[BLE-Daemon] \(iface) connected to normal Wi-Fi. P2P removed from preferred list.")
             fflush(stdout)
-            _ = runProcessCapture("/usr/sbin/networksetup", ["-setairportnetwork", iface, targetSsid])
-        } else {
-            // Home network unknown: let macOS auto-join its own preferred network by cycling Wi-Fi power.
-            print("[BLE-Daemon] Home Wi-Fi unknown; re-enabling auto-join on \(iface).")
-            fflush(stdout)
-            _ = runProcessCapture("/usr/sbin/networksetup", ["-setairportpower", iface, "off"])
+            setSavedHomeWifiSsid("")
+            try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
+            clearActiveP2pSession()
+            resumeCloudflareWarpIfNeeded()
+            return
+        }
+
+        print("[BLE-Daemon] Restoring Mac Internet Wi-Fi (disconnecting P2P on \(iface))...")
+        fflush(stdout)
+
+        // 3. Resolve target home network to restore from memory or persisted PREV_WIFI_FILE.
+        let targetSsid = savedSsid
+
+        // 4. Disassociate iface using CoreWLAN to cleanly detach from P2P when still on P2P
+        if onP2p {
+            if let cwIface = CWWiFiClient.shared().interface(withName: iface) ?? CWWiFiClient.shared().interface() {
+                cwIface.disassociate()
+            }
             Thread.sleep(forTimeInterval: 0.5)
-            _ = runProcessCapture("/usr/sbin/networksetup", ["-setairportpower", iface, "on"])
         }
-    }
 
-    // 6. Wait synchronously up to 3.0s for iface to obtain normal Wi-Fi IPv4 before resuming WARP
-    let waitDeadline = Date().addingTimeInterval(3.0)
-    while Date() < waitDeadline {
-        if wifiHasNormalIpv4() { break }
-        Thread.sleep(forTimeInterval: 0.25)
-    }
+        // 5. If target network is known and not yet reconnected, reassociate
+        let activeNow = currentWifiSsid()
+        if activeNow.isEmpty && !wifiHasNormalIpv4() {
+            if !targetSsid.isEmpty {
+                print("[BLE-Daemon] Fast-reassociating \(iface) to home Wi-Fi '\(targetSsid)'...")
+                fflush(stdout)
+                _ = runProcessCapture("/usr/sbin/networksetup", ["-setairportnetwork", iface, targetSsid])
+            } else {
+                // Home network unknown: let macOS auto-join its own preferred network by cycling Wi-Fi power.
+                print("[BLE-Daemon] Home Wi-Fi unknown; re-enabling auto-join on \(iface).")
+                fflush(stdout)
+                _ = runProcessCapture("/usr/sbin/networksetup", ["-setairportpower", iface, "off"])
+                Thread.sleep(forTimeInterval: 0.5)
+                _ = runProcessCapture("/usr/sbin/networksetup", ["-setairportpower", iface, "on"])
+            }
+        }
 
-    setSavedHomeWifiSsid("")
-    try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
-    clearActiveP2pSession()
-    resumeCloudflareWarpIfNeeded()
-    print("[BLE-Daemon] Wi-Fi restored and auto-reassociation completed.")
-    fflush(stdout)
+        // 6. Wait synchronously up to 3.0s for iface to obtain normal Wi-Fi IPv4 before resuming WARP
+        let waitDeadline = Date().addingTimeInterval(3.0)
+        while Date() < waitDeadline {
+            if wifiHasNormalIpv4() { break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+
+        setSavedHomeWifiSsid("")
+        try? FileManager.default.removeItem(at: PREV_WIFI_FILE)
+        clearActiveP2pSession()
+        resumeCloudflareWarpIfNeeded()
+        print("[BLE-Daemon] Wi-Fi restored and auto-reassociation completed.")
+        fflush(stdout)
+    }
 }
 
 func hasPendingWifiRestoreState(
@@ -1987,11 +2236,15 @@ func readExact(
     fileCount: Int = 1,
     timeout: TimeInterval? = nil,
     checkCancel: Bool = false,
+    inactivityTimeout: Bool = false,
     onWaitTick: (() -> Void)? = nil,
     onTimeout: (() -> Void)? = nil
 ) -> Data? {
     guard count >= 0 else { return nil }
     if count == 0 { return Data() }
+
+    let activityLock = NSLock()
+    var lastProgressAt = Date()
 
     func readSync(shouldStop: @escaping () -> Bool) -> Data? {
         var data = Data(count: count)
@@ -2013,6 +2266,9 @@ func readExact(
             }
             if readCount > 0 {
                 offset += readCount
+                activityLock.lock()
+                lastProgressAt = Date()
+                activityLock.unlock()
                 if trackProgress {
                     let now = Date()
                     if now.timeIntervalSince(lastEmit) >= 0.1 || offset == count {
@@ -2020,7 +2276,7 @@ func readExact(
                         let elapsed = max(0.1, now.timeIntervalSince(startTime))
                         let speed = Int64(Double(offset) / elapsed)
                         let rem = Int64(max(0, count - offset))
-                        let eta = speed > 0 ? (rem / speed) : 0
+                        let eta = (speed > 0 && elapsed >= 0.5 && offset >= 65_536) ? (rem / speed) : 0
                         let pct = min(99, (offset * 100) / max(1, count))
                         writeProgressJson(
                             active: true,
@@ -2072,7 +2328,7 @@ func readExact(
         sem.signal()
     }
 
-    let deadline = Date().addingTimeInterval(timeout)
+    let fixedDeadline = Date().addingTimeInterval(timeout)
     var lastTick = Date()
     while true {
         if (trackProgress || checkCancel) && isTransferCancelled() {
@@ -2082,6 +2338,14 @@ func readExact(
             if trackProgress { writeProgressJson(active: false) }
             onTimeout?()
             return nil
+        }
+        let deadline: Date
+        if inactivityTimeout {
+            activityLock.lock()
+            deadline = lastProgressAt.addingTimeInterval(timeout)
+            activityLock.unlock()
+        } else {
+            deadline = fixedDeadline
         }
         let remaining = deadline.timeIntervalSinceNow
         if remaining <= 0 {
@@ -2112,6 +2376,8 @@ func writeControlBytes(_ stream: OutputStream, data: Data) -> Bool {
     var idleLoops = 0
     while offset < total {
         if !stream.hasSpaceAvailable {
+            let st = stream.streamStatus
+            if st == .atEnd || st == .error || st == .closed { return false }
             Thread.sleep(forTimeInterval: 0.001)
             idleLoops += 1
             if idleLoops > 120000 { return false }
@@ -2125,6 +2391,8 @@ func writeControlBytes(_ stream: OutputStream, data: Data) -> Bool {
         if written > 0 {
             offset += written
         } else if written == 0 {
+            let st = stream.streamStatus
+            if st == .atEnd || st == .error || st == .closed { return false }
             Thread.sleep(forTimeInterval: 0.002)
         } else {
             return false
@@ -2157,6 +2425,11 @@ func writeAll(
             return false
         }
         if !stream.hasSpaceAvailable {
+            let st = stream.streamStatus
+            if st == .atEnd || st == .error || st == .closed {
+                if trackProgress { writeProgressJson(active: false) }
+                return false
+            }
             Thread.sleep(forTimeInterval: 0.001)
             idleLoops += 1
             if idleLoops > 120000 {
@@ -2184,7 +2457,7 @@ func writeAll(
                     let elapsed = max(0.1, now.timeIntervalSince(startTime))
                     let speed = Int64(Double(offset) / elapsed)
                     let rem = Int64(max(0, total - offset))
-                    let eta = speed > 0 ? (rem / speed) : 0
+                    let eta = (speed > 0 && elapsed >= 0.5 && offset >= 65_536) ? (rem / speed) : 0
                     writeProgressJson(
                         active: true,
                         direction: "Sending",
@@ -2431,8 +2704,21 @@ enum WifiJoinFailure {
     case rejected
 }
 
-/// Most recent failure reason from joinWifiDirectNetwork (single sender per process).
-var lastWifiJoinFailure: WifiJoinFailure? = nil
+/// Most recent failure reason from joinWifiDirectNetwork (protected by lock across threads).
+private let wifiJoinFailureLock = NSLock()
+private var _lastWifiJoinFailure: WifiJoinFailure? = nil
+
+func setLastWifiJoinFailure(_ val: WifiJoinFailure?) {
+    wifiJoinFailureLock.lock()
+    _lastWifiJoinFailure = val
+    wifiJoinFailureLock.unlock()
+}
+
+func getLastWifiJoinFailure() -> WifiJoinFailure? {
+    wifiJoinFailureLock.lock()
+    defer { wifiJoinFailureLock.unlock() }
+    return _lastWifiJoinFailure
+}
 
 /// Delay before the next join attempt: exponential backoff from 1.5 s capped at 6 s.
 func wifiJoinBackoff(attempt: Int) -> TimeInterval {
@@ -2452,7 +2738,7 @@ func joinWifiDirectNetwork(iface: String, ssid: String, pass: String, logPrefix:
                            hints: WifiJoinHints = WifiJoinHints()) -> Bool {
     if let cwIface = CWWiFiClient.shared().interface(withName: iface) ?? CWWiFiClient.shared().interface() {
         if !cwIface.powerOn() {
-            lastWifiJoinFailure = .wifiOff
+            setLastWifiJoinFailure(.wifiOff)
             print("\(logPrefix) Wi-Fi interface \(iface) is powered off; cannot join \(ssid)")
             fflush(stdout)
             return false
@@ -2483,14 +2769,23 @@ func joinWifiDirectNetwork(iface: String, ssid: String, pass: String, logPrefix:
         if let targetNet = matchedNet {
             do {
                 try cwIface.associate(to: targetNet, password: pass)
-                print("\(logPrefix) CoreWLAN associated to \(ssid) (ch \(targetNet.wlanChannel?.channelNumber ?? 0), rssi \(targetNet.rssiValue))")
+                let widthLabel: String = {
+                    switch targetNet.wlanChannel?.channelWidth {
+                    case .width20MHz: return "20MHz"
+                    case .width40MHz: return "40MHz"
+                    case .width80MHz: return "80MHz"
+                    case .width160MHz: return "160MHz"
+                    default: return "unknown"
+                    }
+                }()
+                print("\(logPrefix) CoreWLAN associated to \(ssid) (ch \(targetNet.wlanChannel?.channelNumber ?? 0), \(widthLabel), rssi \(targetNet.rssiValue))")
                 fflush(stdout)
                 return true
             } catch {
                 let nsErr = error as NSError
                 print("\(logPrefix) CoreWLAN associate failed for \(ssid) (attempt \(attempt)): \(error.localizedDescription) [domain=\(nsErr.domain) code=\(nsErr.code) userInfo=\(nsErr.userInfo)]")
                 fflush(stdout)
-                lastWifiJoinFailure = .rejected
+                setLastWifiJoinFailure(.rejected)
             }
         }
     }
@@ -2509,7 +2804,7 @@ func joinWifiDirectNetwork(iface: String, ssid: String, pass: String, logPrefix:
     }
     print("\(logPrefix) networksetup join \(ssid) on \(iface) (attempt \(attempt)) rc=\(joinRc)\(cleanJoinOut.isEmpty ? "" : ": \(cleanJoinOut)")")
     fflush(stdout)
-    if lastWifiJoinFailure != .rejected { lastWifiJoinFailure = .notFound }
+    if getLastWifiJoinFailure() != .rejected { setLastWifiJoinFailure(.notFound) }
     return false
 }
 
@@ -2543,7 +2838,7 @@ func associateWifiDirectWithRetry(
     if let existing = currentWifiP2pAddressAndCidr(matchingGateway: matchingGateway, matchingSsid: ssid, on: iface), !existing.ip.isEmpty {
         return existing
     }
-    lastWifiJoinFailure = nil
+    setLastWifiJoinFailure(nil)
     // Clear any stale profile/password for this name before joining, and again if the join fails.
     forgetWifiDirectProfile(iface: iface, ssid: ssid)
     var joinedOk = false
@@ -2577,7 +2872,7 @@ func associateWifiDirectWithRetry(
                 return resolved
             }
             // Unrecoverable: Wi-Fi is off, so further attempts cannot succeed. Stop now.
-            if lastWifiJoinFailure == .wifiOff { break }
+            if getLastWifiJoinFailure() == .wifiOff { break }
         }
 
         if Date().timeIntervalSince(lastProgressTouch) >= 2.0 {
@@ -2597,7 +2892,7 @@ func associateWifiDirectWithRetry(
 func wifiJoinFailureStage() -> WifiDirectStage {
     // The OS accepted a join request but never produced an address: address assignment.
     // Otherwise the SoftAP was never found, was refused, or Wi-Fi is off: association.
-    lastWifiJoinFailure == nil ? .addressAssignment : .association
+    getLastWifiJoinFailure() == nil ? .addressAssignment : .association
 }
 
 func logWifiDirectStageFailure(_ stage: WifiDirectStage, logPrefix: String) {
@@ -3250,11 +3545,9 @@ func extractDvzipCpioToDownloads(
     var handledUrls = 0
     if let items = metaDict["Items"] as? [Any] {
         for item in items {
-            if let s = item as? String,
-               let parsed = URL(string: s),
-               let scheme = parsed.scheme?.lowercased(),
-               (scheme == "http" || scheme == "https"),
-               parsed.host != nil {
+            if let raw = item as? String,
+               let parsed = parseSafeExternalWebUrl(raw) {
+                let s = parsed.absoluteString
                 print("[BLE-RX] Received URL from \(sender): \(s)")
                 appendReceivedLog(kind: "URL", value: s, sizeBytes: Int64(s.utf8.count), direction: "received", peerName: sender)
                 DispatchQueue.main.async {
@@ -3277,16 +3570,57 @@ func extractDvzipCpioToDownloads(
             return false
         }
         defer { try? FileManager.default.removeItem(at: tmpBin) }
+        var manifestList: [[String: Any]] = []
+        if let filesArr = metaDict["Files"] as? [[String: Any]] {
+            for fd in filesArr {
+                if let fname = fd["FileName"] as? String,
+                   let fsizeNum = fd["FileSize"] as? NSNumber {
+                    manifestList.append(["name": fname, "size": fsizeNum.int64Value])
+                }
+            }
+        }
+        let manifestJson = (try? String(data: JSONSerialization.data(withJSONObject: manifestList), encoding: .utf8)) ?? "[]"
         let py = Process()
         py.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         py.arguments = [
             "-c",
             """
-            import gzip, io, os, shutil, struct, sys, zlib
+            import gzip, io, json, os, shutil, struct, sys, unicodedata, zlib
             from pathlib import Path
 
             MAX_DECOMP = int(sys.argv[3])
             MIN_FREE_HEADROOM = 10_000_000
+            manifest_raw = json.loads(sys.argv[4]) if len(sys.argv) > 4 else []
+            approved_manifest = [(os.path.basename(str(item["name"]).replace("\\\\", "/")), int(item["size"])) for item in manifest_raw]
+
+            def truncate_utf8_filename(name: str, max_bytes: int = 239) -> str:
+                if len(name.encode("utf-8")) <= max_bytes:
+                    return name
+                stem, ext = os.path.splitext(name)
+                if len(ext.encode("utf-8")) >= max_bytes:
+                    ext = ""
+                    stem = name
+                budget = max(1, max_bytes - len(ext.encode("utf-8")))
+                out = bytearray()
+                for ch in stem:
+                    cb = ch.encode("utf-8")
+                    if len(out) + len(cb) > budget:
+                        break
+                    out.extend(cb)
+                return (out.decode("utf-8", "ignore") or "file") + ext
+
+            def publish_noclobber(staged: Path, target: Path) -> Path:
+                stem, suffix = target.stem, target.suffix
+                idx = 0
+                while True:
+                    cand_name = target.name if idx == 0 else truncate_utf8_filename(f"{stem}_{idx}{suffix}", 239)
+                    candidate = target.with_name(cand_name)
+                    try:
+                        os.link(staged, candidate, follow_symlinks=False)
+                        staged.unlink()
+                        return candidate
+                    except FileExistsError:
+                        idx += 1
 
             class BoundedGzipReader:
                 def __init__(self, gz_file, max_out):
@@ -3403,6 +3737,7 @@ func extractDvzipCpioToDownloads(
             dest = dest_raw.resolve()
             saw_trailer = False
             raw_total_bytes = 0
+            remaining_manifest = list(approved_manifest)
 
             with src.open("rb") as f:
                 prefix = f.read(6)
@@ -3468,57 +3803,78 @@ func extractDvzipCpioToDownloads(
                         if len(read_exact(stream, pad)) < pad:
                             raise EOFError("Truncated CPIO header padding")
                     if name == "TRAILER!!!":
+                        if remaining_manifest:
+                            raise ValueError("Upload is missing approved files")
                         saw_trailer = True
                         break
                     if (mode & 0o170000) == 0o100000:
-                        sn = os.path.basename(name.replace("\\\\", "/")).lstrip(".") or "glidedrop_file"
-                        t = (dest / sn).resolve()
-                        if t.parent != dest:
-                            raise ValueError(f"Path traversal rejected: {name}")
-                        free_bytes = shutil.disk_usage(dest).free
-                        if free_bytes < fs + MIN_FREE_HEADROOM:
-                            raise OSError("Insufficient disk space")
-                        orig_stem = t.stem
-                        orig_suffix = t.suffix
-                        idx = 1
-                        while t.exists() or t.is_symlink():
-                            t = dest / f"{orig_stem}_{idx}{orig_suffix}"
-                            idx += 1
-                        part_t = t.with_name(t.name + ".part")
-                        while part_t.exists() or part_t.is_symlink():
-                            if part_t.is_symlink():
-                                raise ValueError("Refusing symlink staging file")
-                            t = dest / f"{orig_stem}_{idx}{orig_suffix}"
-                            part_t = t.with_name(t.name + ".part")
-                            idx += 1
-                        try:
-                            o_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-                            fd = os.open(str(part_t), o_flags, 0o644)
-                            with os.fdopen(fd, "wb") as out_f:
-                                rem = fs
-                                while rem > 0:
-                                    c = stream.read(min(65536, rem))
-                                    if not c:
-                                        break
-                                    out_f.write(c)
-                                    rem -= len(c)
-                                out_f.flush()
-                                os.fsync(out_f.fileno())
+                        raw_base = os.path.basename(name.replace("\\\\", "/"))
+                        if raw_base.startswith("._"):
+                            rem = fs
+                            while rem > 0:
+                                c = stream.read(min(65536, rem))
+                                if not c:
+                                    break
+                                rem -= len(c)
                             if rem > 0:
-                                part_t.unlink(missing_ok=True)
-                                raise EOFError(f"Truncated CPIO file data: missing {rem} bytes")
-                            if t.is_symlink():
-                                raise ValueError("Refusing symlink target")
-                            part_t.replace(t)
+                                raise EOFError(f"Truncated CPIO metadata entry: missing {rem} bytes")
+                        else:
+                            item = (raw_base, fs)
+                            if item not in remaining_manifest:
+                                raise ValueError("CPIO entry does not match approved file manifest")
+                            remaining_manifest.remove(item)
+                            cleaned = "".join(
+                                "_" if (ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or unicodedata.category(ch) == "Cf" or ch in "/:*?\\"<>|" or ord(ch) == 92) else ch
+                                for ch in raw_base.strip()
+                            )
+                            sn = truncate_utf8_filename(cleaned.lstrip(".-").rstrip(" .") or "glidedrop_file", 239)
+                            t = (dest / sn).resolve()
+                            if t.parent != dest:
+                                raise ValueError(f"Path traversal rejected: {name}")
+                            free_bytes = shutil.disk_usage(dest).free
+                            if free_bytes < fs + MIN_FREE_HEADROOM:
+                                raise OSError("Insufficient disk space")
+                            orig_stem = t.stem
+                            orig_suffix = t.suffix
+                            idx = 1
+                            while t.exists() or t.is_symlink():
+                                t = dest / truncate_utf8_filename(f"{orig_stem}_{idx}{orig_suffix}", 239)
+                                idx += 1
+                            part_t = t.with_name(t.name + ".part")
+                            while part_t.exists() or part_t.is_symlink():
+                                if part_t.is_symlink():
+                                    raise ValueError("Refusing symlink staging file")
+                                t = dest / truncate_utf8_filename(f"{orig_stem}_{idx}{orig_suffix}", 239)
+                                part_t = t.with_name(t.name + ".part")
+                                idx += 1
                             try:
-                                import subprocess
-                                subprocess.run(["xattr", "-w", "com.apple.quarantine", "0081;00000000;GlideDrop;", str(t)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                o_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                                fd = os.open(str(part_t), o_flags, 0o600)
+                                with os.fdopen(fd, "wb") as out_f:
+                                    rem = fs
+                                    while rem > 0:
+                                        c = stream.read(min(65536, rem))
+                                        if not c:
+                                            break
+                                        out_f.write(c)
+                                        rem -= len(c)
+                                    out_f.flush()
+                                    os.fsync(out_f.fileno())
+                                if rem > 0:
+                                    part_t.unlink(missing_ok=True)
+                                    raise EOFError(f"Truncated CPIO file data: missing {rem} bytes")
+                                if t.is_symlink():
+                                    raise ValueError("Refusing symlink target")
+                                t = publish_noclobber(part_t, t)
+                                try:
+                                    import subprocess
+                                    subprocess.run(["xattr", "-w", "com.apple.quarantine", "0081;00000000;GlideDrop;", str(t)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                except Exception:
+                                    pass
+                                print(t)
                             except Exception:
-                                pass
-                            print(t)
-                        except Exception:
-                            part_t.unlink(missing_ok=True)
-                            raise
+                                part_t.unlink(missing_ok=True)
+                                raise
                     else:
                         rem = fs
                         while rem > 0:
@@ -3537,7 +3893,8 @@ func extractDvzipCpioToDownloads(
             """,
             tmpBin.path,
             downloads.path,
-            String(maxDecompressedBytes)
+            String(maxDecompressedBytes),
+            manifestJson
         ]
         let outPipe = Pipe()
         py.standardOutput = outPipe
@@ -3589,7 +3946,6 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
     var pm: CBPeripheralManager!
     var cm: CBCentralManager!
     var activeChannels: [CBL2CAPChannel] = []
-    var publishedPsm: CBL2CAPPSM = 0
     var discoveredPeerPeripheral: CBPeripheral?
     var activePingPeripheral: CBPeripheral?
     var discoveredPeerPsm: CBL2CAPPSM = 0
@@ -3603,8 +3959,22 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
     private let pingStateLock = NSLock()
     private var pingPeerDisconnected: Bool = false
     private var incomingL2capChannelCount: Int = 0
+    private let maxConcurrentIncomingL2cap = 4
     private var isPublishingL2cap: Bool = false
     private var hasPublishedGattService: Bool = false
+    private var _publishedPsm: CBL2CAPPSM = 0
+
+    func getPublishedPsm() -> CBL2CAPPSM {
+        pingStateLock.lock()
+        defer { pingStateLock.unlock() }
+        return _publishedPsm
+    }
+
+    func setPublishedPsm(_ psm: CBL2CAPPSM) {
+        pingStateLock.lock()
+        _publishedPsm = psm
+        pingStateLock.unlock()
+    }
 
     func setPingPeerDisconnected(_ val: Bool) {
         pingStateLock.lock()
@@ -3616,6 +3986,14 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
         pingStateLock.lock()
         defer { pingStateLock.unlock() }
         return pingPeerDisconnected
+    }
+
+    private func tryAcquireIncomingL2capChannelSlot() -> Bool {
+        pingStateLock.lock()
+        defer { pingStateLock.unlock() }
+        guard incomingL2capChannelCount < maxConcurrentIncomingL2cap else { return false }
+        incomingL2capChannelCount += 1
+        return true
     }
 
     private func incrementIncomingL2capChannelCount() {
@@ -3682,7 +4060,8 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
 
     private func ensurePeripheralPublishedAndAdvertising() {
         guard loadMacSettings().visible, let pm = pm, pm.state == .poweredOn else { return }
-        if publishedPsm == 0 {
+        let curPsm = getPublishedPsm()
+        if curPsm == 0 {
             if !isPublishingL2cap {
                 isPublishingL2cap = true
                 pm.publishL2CAPChannel(withEncryption: false)
@@ -3690,19 +4069,20 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             return
         }
         if !hasPublishedGattService {
-            publishGattServiceAndAdvertise(peripheral: pm, psm: publishedPsm)
+            publishGattServiceAndAdvertise(peripheral: pm, psm: curPsm)
         } else if !pm.isAdvertising {
-            let psmUuid = CBUUID(string: String(format: "%04X", 0xAD00 | (Int(publishedPsm) & 0xFF)))
+            let psmUuid = CBUUID(string: String(format: "%04X", 0xAD00 | (Int(curPsm) & 0xFF)))
             pm.startAdvertising([
                 CBAdvertisementDataServiceUUIDsKey: [MAC_SERVICE_UUID, psmUuid]
             ])
-            print("[BLE-Daemon] Started BLE advertising on PSM \(publishedPsm)")
+            print("[BLE-Daemon] Started BLE advertising on PSM \(curPsm)")
             fflush(stdout)
         }
     }
 
     func stopAdvertisingAndScanning() {
         isPublishingL2cap = false
+        let prevPsm = getPublishedPsm()
         if pm?.state == .poweredOn {
             if pm.isAdvertising {
                 pm.stopAdvertising()
@@ -3711,15 +4091,15 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             // so phones cannot continue discovering this Mac after "Discoverable Nearby" is turned off.
             pm.removeAllServices()
             hasPublishedGattService = false
-            if publishedPsm > 0 {
-                pm.unpublishL2CAPChannel(publishedPsm)
+            if prevPsm > 0 {
+                pm.unpublishL2CAPChannel(prevPsm)
             }
             print("[BLE-Daemon] Stopped BLE advertising, GATT services, and L2CAP channel (Incoming radio turned off)")
         } else {
             pm?.removeAllServices()
             hasPublishedGattService = false
         }
-        publishedPsm = 0
+        setPublishedPsm(0)
         let openChannels = activeChannels
         activeChannels.removeAll()
         for ch in openChannels {
@@ -3858,7 +4238,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
     func pingPeerIfNeeded() {
         let settings = loadMacSettings()
         guard settings.visible else {
-            if pm?.isAdvertising == true || hasPublishedGattService || publishedPsm > 0 ||
+            if pm?.isAdvertising == true || hasPublishedGattService || getPublishedPsm() > 0 ||
                (cm?.state == .poweredOn && cm?.isScanning == true) || isPingingPeer {
                 stopAdvertisingAndScanning()
             }
@@ -3973,7 +4353,8 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
         let targetPeerId = peripheral.identifier.uuidString
         let currentPsm = Int(discoveredPeerPsm)
         let currentRssi = discoveredPeerRssi
-        let myPsm = Int(publishedPsm > 0 ? publishedPsm : 0)
+        let curLocalPsm = getPublishedPsm()
+        let myPsm = Int(curLocalPsm > 0 ? curLocalPsm : 0)
         if myPsm == 0 {
             print("[BLE-Daemon] Warning: local L2CAP PSM not published yet when sending heartbeat PING")
             fflush(stdout)
@@ -4182,7 +4563,8 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         return
                     }
                     DispatchQueue.main.async { self?.pingStartedAt = Date().timeIntervalSince1970 + 90.0 }
-                    guard let lenHdr = readExact(inp, count: 8) else { return }
+                    let onFrameTimeout: () -> Void = { inp.close(); out.close() }
+                    guard let lenHdr = readExact(inp, count: 8, timeout: 15.0, checkCancel: true, onTimeout: onFrameTimeout) else { return }
                     let metaLen = readUInt32BE(lenHdr, offset: 0)
                     let archLen = readUInt32BE(lenHdr, offset: 4)
                     guard metaLen > 0 && metaLen <= MAX_BLE_META_BYTES && archLen >= 0 && archLen <= MAX_ENCRYPTED_BLE_ARCHIVE_BYTES else {
@@ -4190,7 +4572,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         return
                     }
 
-                    guard let rawMeta = readExact(inp, count: metaLen),
+                    guard let rawMeta = readExact(inp, count: metaLen, timeout: 20.0, checkCancel: true, onTimeout: onFrameTimeout),
                           let metaData = decryptBlePayload(rawMeta, key: activeBleKey) else {
                         print("[BLE-Daemon] Failed to decrypt ADRE metadata with ephemeral ECDH BLE key")
                         _ = writeAll(out, data: Data("NO\r\n".utf8))
@@ -4201,9 +4583,9 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                     let filesArr = (metaDict["Files"] as? [[String: Any]]) ?? []
                     let itemsArr = (metaDict["Items"] as? [Any])?.compactMap { $0 as? String } ?? []
                     let fileNames = filesArr.compactMap { $0["FileName"] as? String }
-                    let displayNames = fileNames.isEmpty ? itemsArr : fileNames
+                    let displayNames = fileNames + itemsArr
                     let prelimLabel = displayNames.first ?? "Incoming BLE File"
-                    let totalAskBytes = filesArr.reduce(Int64(0)) { $0 + Int64(($1["FileSize"] as? Int) ?? 0) }
+                    let totalAskBytes = filesArr.reduce(Int64(0)) { $0 + Int64(($1["FileSize"] as? NSNumber)?.int64Value ?? 0) }
                     let effectiveBytes = totalAskBytes > 0 ? totalAskBytes : Int64(archLen)
 
                     let isCentralAdreAborted: () -> Bool = { [weak self] in
@@ -4221,7 +4603,11 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                             count: archLen,
                             trackProgress: true,
                             fileLabel: prelimLabel,
-                            fileCount: max(1, displayNames.count)
+                            fileCount: max(1, displayNames.count),
+                            timeout: 30.0,
+                            checkCancel: true,
+                            inactivityTimeout: true,
+                            onTimeout: onFrameTimeout
                         ),
                         let decodedArch = decryptBlePayload(rawArch, key: activeBleKey) else {
                             _ = writeAll(out, data: Data("NO\r\n".utf8))
@@ -4247,7 +4633,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
         guard peripheral.state == .poweredOn else {
             isPublishingL2cap = false
             hasPublishedGattService = false
-            publishedPsm = 0
+            setPublishedPsm(0)
             return
         }
         if loadMacSettings().visible {
@@ -4274,19 +4660,19 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             }
             peripheral.removeAllServices()
             hasPublishedGattService = false
-            publishedPsm = 0
+            setPublishedPsm(0)
             print("[BLE-Daemon] Radio visibility is OFF — unpublished PSM \(PSM) immediately")
             fflush(stdout)
             return
         }
-        publishedPsm = PSM
+        setPublishedPsm(PSM)
         print("[BLE-Daemon] Published Direct BLE L2CAP channel on PSM \(PSM)")
         fflush(stdout)
         publishGattServiceAndAdvertise(peripheral: peripheral, psm: PSM)
     }
 
     func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
-        print("[BLE-Daemon] Advertising AD-\(publishedPsm) (error=\(String(describing: error)))")
+        print("[BLE-Daemon] Advertising AD-\(getPublishedPsm()) (error=\(String(describing: error)))")
         fflush(stdout)
     }
 
@@ -4297,7 +4683,13 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
             return
         }
         guard let ch = channel, error == nil else { return }
-        incrementIncomingL2capChannelCount()
+        guard tryAcquireIncomingL2capChannelSlot() else {
+            print("[BLE-Daemon] Incoming BLE L2CAP connection cap reached — closing channel on PSM \(ch.psm)")
+            fflush(stdout)
+            closeStreamSafely(ch.inputStream)
+            closeStreamSafely(ch.outputStream)
+            return
+        }
         activeChannels.append(ch)
         print("[BLE-Daemon] Incoming BLE L2CAP connection on PSM \(ch.psm)")
         fflush(stdout)
@@ -4320,9 +4712,10 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                     self?.activeChannels.removeAll { $0 === ch }
                 }
             }
+            let onChannelTimeout: () -> Void = { inp.close(); out.close() }
             var bleSessionKey: SymmetricKey? = nil
             while true {
-                guard let hdr = readExact(inp, count: 12) else { return }
+                guard let hdr = readExact(inp, count: 12, timeout: 20.0, checkCancel: true, onTimeout: onChannelTimeout) else { return }
                 let magic = String(data: hdr.subdata(in: 0..<4), encoding: .ascii) ?? ""
                 let metaLen = readUInt32BE(hdr, offset: 4)
                 let archLen = readUInt32BE(hdr, offset: 8)
@@ -4332,7 +4725,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                 }
 
                 if magic == "PING" {
-                    guard let pingData = readExact(inp, count: metaLen),
+                    guard let pingData = readExact(inp, count: metaLen, timeout: 15.0, checkCancel: true, onTimeout: onChannelTimeout),
                           let pingStr = String(data: pingData, encoding: .utf8) else { return }
                     let parts = pingStr.split(separator: "\t").map(String.init)
                     let peerName = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Android Peer"
@@ -4351,7 +4744,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         rssi: existingPeer?.rssi ?? peerRssi
                     )
                     let macName = loadMacSettings().deviceName
-                    let myPsm = self?.publishedPsm ?? 0
+                    let myPsm = self?.getPublishedPsm() ?? 0
                     if myPsm == 0 {
                         print("[BLE-Daemon] Warning: local L2CAP PSM not published yet when answering PING")
                         fflush(stdout)
@@ -4361,7 +4754,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                 }
 
                 if magic == "W2P2" {
-                    guard let reqData = readExact(inp, count: metaLen),
+                    guard let reqData = readExact(inp, count: metaLen, timeout: 15.0, checkCancel: true, onTimeout: onChannelTimeout),
                           let reqStr = String(data: reqData, encoding: .utf8) else { return }
                     let w2p2Req = parseW2p2Request(reqStr)
                     if w2p2Req.version < W2P2_PROTOCOL_VERSION {
@@ -4457,7 +4850,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
 
                 if magic == "BLEK" {
                     guard bleSessionKey == nil, metaLen > 0, metaLen <= 4096, archLen == 0,
-                          let pubData = readExact(inp, count: metaLen),
+                          let pubData = readExact(inp, count: metaLen, timeout: 15.0, checkCancel: true, onTimeout: onChannelTimeout),
                           let androidPubB64 = String(data: pubData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                           !androidPubB64.isEmpty,
                           let androidPubDer = Data(base64Encoded: androidPubB64),
@@ -4498,7 +4891,7 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                 print("[BLE-Daemon] Receiving ADRE frame (meta=\(metaLen) B, archive=\(archLen) B)...")
                 fflush(stdout)
 
-                guard let rawMeta = readExact(inp, count: metaLen),
+                guard let rawMeta = readExact(inp, count: metaLen, timeout: 20.0, checkCancel: true, onTimeout: onChannelTimeout),
                       let metaData = decryptBlePayload(rawMeta, key: activeBleKey) else {
                     print("[BLE-Daemon] Failed to decrypt ADRE metadata with ephemeral ECDH BLE key")
                     _ = writeAll(out, data: Data("NO\r\n".utf8))
@@ -4509,9 +4902,9 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                 let filesArr = (metaDict["Files"] as? [[String: Any]]) ?? []
                 let itemsArr = (metaDict["Items"] as? [Any])?.compactMap { $0 as? String } ?? []
                 let fileNames = filesArr.compactMap { $0["FileName"] as? String }
-                let displayNames = fileNames.isEmpty ? itemsArr : fileNames
+                let displayNames = fileNames + itemsArr
                 let prelimLabel = displayNames.first ?? "Incoming BLE File"
-                let totalAskBytes = filesArr.reduce(Int64(0)) { $0 + Int64(($1["FileSize"] as? Int) ?? 0) }
+                let totalAskBytes = filesArr.reduce(Int64(0)) { $0 + Int64(($1["FileSize"] as? NSNumber)?.int64Value ?? 0) }
                 let effectiveBytes = totalAskBytes > 0 ? totalAskBytes : Int64(archLen)
 
                 // Update active peer record with the full sender name learned from the metadata
@@ -4538,7 +4931,11 @@ final class BleGlideDropDaemon: NSObject, CBPeripheralManagerDelegate, CBCentral
                         count: archLen,
                         trackProgress: true,
                         fileLabel: prelimLabel,
-                        fileCount: max(1, displayNames.count)
+                        fileCount: max(1, displayNames.count),
+                        timeout: 30.0,
+                        checkCancel: true,
+                        inactivityTimeout: true,
+                        onTimeout: onChannelTimeout
                     ),
                     let decodedArch = decryptBlePayload(rawArch, key: activeBleKey) else {
                         _ = writeAll(out, data: Data("NO\r\n".utf8))
@@ -5194,7 +5591,12 @@ final class BleGlideDropSender: NSObject, CBCentralManagerDelegate, CBPeripheral
                 var w2p2ReplyLine: String? = nil
                 var w2p2VerificationCode: String? = nil
                 let w2p2SessionId = randomW2p2SessionId()
-                let w2p2Request = "W2P2\t\(W2P2_PROTOCOL_VERSION)\t\(macPubB64)\t\(macSha256Pin)\t\(w2p2HexString(w2p2SessionId))\n"
+                let w2p2SessionIdHex = w2p2HexString(w2p2SessionId)
+                var w2p2Request = "W2P2\t\(W2P2_PROTOCOL_VERSION)\t\(macPubB64)\t\(macSha256Pin)\t\(w2p2SessionIdHex)"
+                if let idProof = signW2p2IdentityProof(version: W2P2_PROTOCOL_VERSION, pubB64: macPubB64, tlsFp: macSha256Pin, sessionIdHex: w2p2SessionIdHex) {
+                    w2p2Request += "\t\(idProof.certDerB64)\t\(idProof.sigB64)"
+                }
+                w2p2Request += "\n"
 
                 // Strict v3 ECDH P-256 negotiation with mandatory peer TLS pinning (no unpinned WP2P downgrade)
                 try? FileManager.default.removeItem(at: STATE_DIR.appendingPathComponent("pinned_peer_tls_fingerprint.txt"))
@@ -5977,10 +6379,9 @@ func clearHistoryLog(filter: Int, stateDir: URL = STATE_DIR) {
         try? FileManager.default.removeItem(at: log)
         return
     }
-    let tmp = stateDir.appendingPathComponent("received.log.tmp")
-    if (try? (kept.joined(separator: "\n") + "\n").write(to: tmp, atomically: false, encoding: .utf8)) != nil {
-        _ = chmod(tmp.path, 0o600)
-        if Darwin.rename(tmp.path, log.path) != 0 { try? FileManager.default.removeItem(at: tmp) }
+    ensurePrivateStateDir(stateDir)
+    if let data = (kept.joined(separator: "\n") + "\n").data(using: .utf8) {
+        _ = writeAtomicPrivateFile(data: data, to: log)
     }
 }
 
@@ -6420,7 +6821,8 @@ final class MacGlideDropViewModel: ObservableObject {
         let decFile = STATE_DIR.appendingPathComponent("ask_decision.json")
         let dict: [String: Any] = ["id": ask.id, "accepted": accepted]
         if let d = try? JSONSerialization.data(withJSONObject: dict) {
-            try? d.write(to: decFile, options: [.atomic])
+            ensurePrivateStateDir(STATE_DIR)
+            _ = writeAtomicPrivateFile(data: d, to: decFile)
         }
         pendingAsk = nil
     }
@@ -6551,7 +6953,7 @@ final class MacGlideDropViewModel: ObservableObject {
         for pf in ["daemon.pid", "awdl-mdns.pid", "ble-daemon.pid"] {
             let f = STATE_DIR.appendingPathComponent(pf)
             if let s = try? String(contentsOf: f, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-               let pid = Int32(s), pid != getpid() {
+               let pid = Int32(s), pid > 0, pid != getpid() {
                 kill(pid, SIGTERM)
             }
             if pf != "ble-daemon.pid" || (try? String(contentsOf: f, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)) != String(getpid()) {
@@ -6612,7 +7014,9 @@ final class MacGlideDropViewModel: ObservableObject {
         if turnOn {
             BleGlideDropDaemon.shared?.startAdvertisingAndScanning()
             BleGlideDropDaemon.shared?.rescanNow()
+            AwdlLoopbackBridge.syncVisibility(true)
         } else {
+            AwdlLoopbackBridge.syncVisibility(false)
             BleGlideDropDaemon.shared?.stopAdvertisingAndScanning()
             activePeers = []
             peerStatusSummary = "0 Nearby Devices • Radio Paused"
@@ -6642,7 +7046,10 @@ final class MacGlideDropViewModel: ObservableObject {
     func cancelActiveTransfer() {
         cancelRequestedUntil = Date().timeIntervalSince1970 + 3.0
         let flag = STATE_DIR.appendingPathComponent("cancel_transfer.flag")
-        try? String(Date().timeIntervalSince1970).write(to: flag, atomically: true, encoding: .utf8)
+        ensurePrivateStateDir(STATE_DIR)
+        if let d = String(Date().timeIntervalSince1970).data(using: .utf8) {
+            _ = writeAtomicPrivateFile(data: d, to: flag)
+        }
         BleGlideDropDaemon.shared?.cancelActivePing()
         if let proc = activeSendProcess, proc.isRunning {
             proc.terminate()
@@ -6810,8 +7217,11 @@ final class MacGlideDropViewModel: ObservableObject {
             stagePathsOrUrls([clip])
         } else {
             let stamp = Int(Date().timeIntervalSince1970)
-            let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Clipboard-\(stamp).txt")
-            try? clip.data(using: .utf8)?.write(to: tmpFile)
+            let suffix = UUID().uuidString.prefix(8)
+            let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Clipboard-\(stamp)-\(suffix).txt")
+            if let d = clip.data(using: .utf8) {
+                _ = writeAtomicPrivateFile(data: d, to: tmpFile)
+            }
             stagePathsOrUrls([tmpFile.path])
         }
     }
@@ -6825,8 +7235,11 @@ final class MacGlideDropViewModel: ObservableObject {
             stagePathsOrUrls([trimmed])
         } else {
             let stamp = Int(Date().timeIntervalSince1970)
-            let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Note-\(stamp).txt")
-            try? trimmed.data(using: .utf8)?.write(to: tmpFile)
+            let suffix = UUID().uuidString.prefix(8)
+            let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Note-\(stamp)-\(suffix).txt")
+            if let d = trimmed.data(using: .utf8) {
+                _ = writeAtomicPrivateFile(data: d, to: tmpFile)
+            }
             stagePathsOrUrls([tmpFile.path])
         }
     }
@@ -6907,7 +7320,8 @@ final class MacGlideDropViewModel: ObservableObject {
             let wasDeclined = (p.terminationStatus == 43)
             clearCancelFlag()
             let txLogUrl = STATE_DIR.appendingPathComponent("tx-send.log")
-            try? outData.write(to: txLogUrl, options: [.atomic])
+            ensurePrivateStateDir(STATE_DIR)
+            _ = writeAtomicPrivateFile(data: outData, to: txLogUrl)
             let out = String(data: outData, encoding: .utf8) ?? ""
             let lastLine = out
                 .split(separator: "\n")
@@ -7312,8 +7726,9 @@ struct MacGlideDropMainView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(p.textSecondary)
                     Spacer()
-                    if prog.etaSeconds > 0 {
-                        Text("~\(prog.etaSeconds)s remaining")
+                    let etaText = formatMacDuration(prog.etaSeconds)
+                    if !etaText.isEmpty {
+                        Text("~\(etaText) remaining")
                             .font(.system(size: 11).monospacedDigit())
                             .foregroundColor(p.textSecondary)
                     }
@@ -8204,8 +8619,10 @@ struct MacGlideDropMainView: View {
             }
             Spacer()
             Button(item.isUrl ? "Open" : "Finder") {
-                if item.isUrl, let u = URL(string: item.value) {
-                    NSWorkspace.shared.open(u)
+                if item.isUrl {
+                    if let u = parseSafeExternalWebUrl(item.value) {
+                        NSWorkspace.shared.open(u)
+                    }
                 } else {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.value)])
                 }
@@ -8875,11 +9292,12 @@ final class StatusBarController: NSObject, NSWindowDelegate, NSApplicationDelega
 
     private func performCleanShutdown() {
         restoreMacInternetWifi()
+        AwdlLoopbackBridge.syncVisibility(false)
         BleGlideDropDaemon.shared?.stopAdvertisingAndScanning()
         for pf in ["daemon.pid", "awdl-mdns.pid"] {
             let f = STATE_DIR.appendingPathComponent(pf)
             if let s = try? String(contentsOf: f, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-               let pid = Int32(s) {
+               let pid = Int32(s), pid > 0, pid != getpid() {
                 kill(pid, SIGTERM)
             }
             try? FileManager.default.removeItem(at: f)
@@ -8965,12 +9383,32 @@ final class StatusBarController: NSObject, NSWindowDelegate, NSApplicationDelega
 // AWDL Peer-to-Peer Socket Bridge (unlocks XNU INP_AWDL_UNRESTRICTED on awdl0)
 // ============================================================================
 final class AwdlLoopbackBridge {
+    private static let sharedLock = NSLock()
+    static var shared: AwdlLoopbackBridge?
+
+    private let connLock = NSLock()
+    private var activeConnectionIDs = Set<ObjectIdentifier>()
+    static let maxBridgeConnections = 8
+
     private var listener: NWListener
     private let params: NWParameters
     private let sockPathOverride: String?
     private let stateDir: URL
     private var triedEphemeralFallback = false
     private let queue = DispatchQueue(label: "com.glidedrop.awdl-bridge", qos: .userInitiated)
+
+    static func syncVisibility(_ visible: Bool) {
+        sharedLock.lock()
+        defer { sharedLock.unlock() }
+        if visible {
+            if shared == nil {
+                shared = try? AwdlLoopbackBridge()
+            }
+        } else {
+            shared?.stop()
+            shared = nil
+        }
+    }
 
     init(
         listenPort: UInt16 = 0,
@@ -8987,6 +9425,25 @@ final class AwdlLoopbackBridge {
         let nwPort = NWEndpoint.Port(rawValue: listenPort) ?? .any
         self.listener = try NWListener(using: p, on: nwPort)
         configureAndStart(listener: self.listener, requestedPort: listenPort)
+    }
+
+    func stop() {
+        listener.cancel()
+        try? FileManager.default.removeItem(at: stateDir.appendingPathComponent("awdl_bridge_port"))
+    }
+
+    private func tryAcquireSlot(for conn: NWConnection) -> Bool {
+        connLock.lock()
+        defer { connLock.unlock() }
+        guard activeConnectionIDs.count < Self.maxBridgeConnections else { return false }
+        activeConnectionIDs.insert(ObjectIdentifier(conn))
+        return true
+    }
+
+    private func releaseSlot(for conn: NWConnection) {
+        connLock.lock()
+        activeConnectionIDs.remove(ObjectIdentifier(conn))
+        connLock.unlock()
     }
 
     private func configureAndStart(listener activeListener: NWListener, requestedPort: UInt16) {
@@ -9025,10 +9482,24 @@ final class AwdlLoopbackBridge {
                 incoming.cancel()
                 return
             }
-            incoming.stateUpdateHandler = { state in
+            guard loadMacSettings().visible else {
+                incoming.cancel()
+                return
+            }
+            guard self.tryAcquireSlot(for: incoming) else {
+                incoming.cancel()
+                return
+            }
+            incoming.stateUpdateHandler = { [weak self] state in
+                guard let self = self else {
+                    incoming.cancel()
+                    return
+                }
                 switch state {
                 case .ready:
-                    guard let path = incoming.currentPath else {
+                    guard loadMacSettings().visible,
+                          let path = incoming.currentPath else {
+                        self.releaseSlot(for: incoming)
                         incoming.cancel()
                         return
                     }
@@ -9037,11 +9508,14 @@ final class AwdlLoopbackBridge {
                         path.usesInterfaceType(.cellular) ||
                         path.usesInterfaceType(.loopback)
                     let ifNames = path.availableInterfaces.map { $0.name }
-                    let endpointsAllowed = isAllowedAwdlEndpoint(path.localEndpoint) &&
-                        isAllowedAwdlEndpoint(path.remoteEndpoint)
+                    let localAddrs = localAwdlLinkLocalIpv6Addresses()
+                    let endpointsAllowed = !localAddrs.isEmpty &&
+                        isAllowedAwdlEndpoint(path.localEndpoint, allowedLocalAddresses: localAddrs) &&
+                        isAllowedAwdlEndpoint(path.remoteEndpoint, allowedLocalAddresses: localAddrs)
                     if isProhibited || !isAllowedAwdlInterfaceNames(ifNames) || !endpointsAllowed {
-                        print("[AWDL-Bridge] Dropping unauthorized connection on non-AWDL path (interfaces=\(ifNames))")
+                        print("[AWDL-Bridge] Dropping unauthorized connection on non-AWDL or foreign path (interfaces=\(ifNames))")
                         fflush(stdout)
+                        self.releaseSlot(for: incoming)
                         incoming.cancel()
                         return
                     }
@@ -9049,13 +9523,15 @@ final class AwdlLoopbackBridge {
                     guard FileManager.default.fileExists(atPath: resolvedSockPath) else {
                         print("[AWDL-Bridge] Finder proxy Unix socket missing at \(resolvedSockPath)")
                         fflush(stdout)
+                        self.releaseSlot(for: incoming)
                         incoming.cancel()
                         return
                     }
                     let outgoing = NWConnection(to: .unix(path: resolvedSockPath), using: .tcp)
-                    outgoing.stateUpdateHandler = { outState in
+                    outgoing.stateUpdateHandler = { [weak self] outState in
                         switch outState {
                         case .failed(_), .cancelled:
+                            self?.releaseSlot(for: incoming)
                             incoming.cancel()
                         default:
                             break
@@ -9065,7 +9541,7 @@ final class AwdlLoopbackBridge {
                     Self.pump(from: incoming, to: outgoing)
                     Self.pump(from: outgoing, to: incoming)
                 case .failed(_), .cancelled:
-                    break
+                    self.releaseSlot(for: incoming)
                 default:
                     break
                 }
@@ -9135,7 +9611,7 @@ func installSafeSignalHandlers() {
 func runGlideDropMain() throws {
     signal(SIGPIPE, SIG_IGN)
     atexit {
-        if proxyEnabledInCurrentProcess {
+        if isProxyEnabledInCurrentProcess() {
             disableMacInternetProxy()
         }
     }
@@ -9185,6 +9661,7 @@ func runGlideDropMain() throws {
                                            progressUpdatedAt: senderProgressUpdatedAt(),
                                            now: Date().timeIntervalSince1970) else { return }
                 sender.connectState.isTerminalFailure = true
+                terminateActiveChildTxProcess()
                 writeProgressJson(active: false)
                 try? FileManager.default.removeItem(at: STATE_DIR.appendingPathComponent("tx_in_progress.lock"))
                 clearOutgoingP2pToken()
@@ -9207,6 +9684,7 @@ func runGlideDropMain() throws {
         let blePidFile = STATE_DIR.appendingPathComponent("ble-daemon.pid")
         if let pidStr = try? String(contentsOf: blePidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            let existingPid = Int32(pidStr),
+           existingPid > 0,
            existingPid != getpid(),
            kill(existingPid, 0) == 0 {
             if !isBackgroundDaemon {
@@ -9220,21 +9698,26 @@ func runGlideDropMain() throws {
             exit(0)
         }
 
-        try? String(getpid()).write(to: blePidFile, atomically: true, encoding: .utf8)
+        ensurePrivateStateDir(STATE_DIR)
+        if let pidData = String(getpid()).data(using: .utf8) {
+            _ = writeAtomicPrivateFile(data: pidData, to: blePidFile)
+        }
         installSafeSignalHandlers()
 
-        // Crash recovery: only in primary daemon after confirming no existing instance is active
-        if FileManager.default.fileExists(atPath: PREV_PROXY_FILE.path) {
-            print("[BLE-Daemon] Lingering prev_proxy_settings.json detected on startup. Performing proxy crash recovery...")
+        // Crash recovery: restore full Wi-Fi / WARP / proxy state when needed, else proxy only.
+        if needsMacInternetWifiRestore() {
+            print("[BLE-Daemon] Lingering P2P/WARP/proxy state detected on startup. Performing Wi-Fi/proxy crash recovery...")
             fflush(stdout)
+            restoreMacInternetWifi()
+        } else {
+            disableMacInternetProxy()
         }
-        disableMacInternetProxy()
 
         if !isBackgroundDaemon {
             let daemonPidFile = STATE_DIR.appendingPathComponent("daemon.pid")
             let httpsAlive: Bool = {
                 guard let s = try? String(contentsOf: daemonPidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-                      let p = Int32(s) else { return false }
+                      let p = Int32(s), p > 0 else { return false }
                 return kill(p, 0) == 0
             }()
             let s = loadMacSettings()
@@ -9264,14 +9747,8 @@ func runGlideDropMain() throws {
         let daemon = BleGlideDropDaemon()
         let bar = StatusBarController(openWindowOnLaunch: !isBackgroundDaemon)
         app.delegate = bar
-        var awdlBridge: AwdlLoopbackBridge? = nil
-        do {
-            awdlBridge = try AwdlLoopbackBridge()
-        } catch {
-            print("[AWDL-Bridge] Warning: failed to start AWDL loopback bridge: \(error)")
-            fflush(stdout)
-        }
-        withExtendedLifetime((daemon, bar, awdlBridge)) {
+        AwdlLoopbackBridge.syncVisibility(loadMacSettings().visible)
+        withExtendedLifetime((daemon, bar)) {
             app.run()
         }
     }

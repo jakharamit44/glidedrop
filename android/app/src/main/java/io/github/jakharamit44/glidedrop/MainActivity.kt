@@ -58,6 +58,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -371,8 +372,12 @@ class MainActivity : ComponentActivity() {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM)
                 }
                 if (stream != null) {
-                    sharedText.value = null
-                    sharedUris.value = listOf(stream)
+                    if (UriSecurity.isSafeShareUri(this, stream)) {
+                        sharedText.value = null
+                        sharedUris.value = listOf(stream)
+                    } else {
+                        Toast.makeText(applicationContext, "Blocked unsafe file share URI", Toast.LENGTH_LONG).show()
+                    }
                     return
                 }
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
@@ -389,8 +394,14 @@ class MainActivity : ComponentActivity() {
                     intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
                 }
                 if (!streams.isNullOrEmpty()) {
-                    sharedText.value = null
-                    sharedUris.value = streams
+                    val safeStreams = streams.filter { UriSecurity.isSafeShareUri(this, it) }
+                    if (safeStreams.size < streams.size) {
+                        Toast.makeText(applicationContext, "Skipped unsafe share URI(s)", Toast.LENGTH_LONG).show()
+                    }
+                    if (safeStreams.isNotEmpty()) {
+                        sharedText.value = null
+                        sharedUris.value = safeStreams
+                    }
                 }
             }
         }
@@ -478,11 +489,13 @@ fun GlideDropScreen(
 
     val appScope = rememberCoroutineScope()
 
+    val appContext = context.applicationContext
+
     fun stageUris(uris: List<Uri>) {
         if (uris.isEmpty()) return
         activeTab = 0
         viewModel.stageUris(context, node, uris) { _, totalCount ->
-            Toast.makeText(context, "$totalCount file(s) staged — tap Send when ready", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, "$totalCount file(s) staged — tap Send when ready", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -553,8 +566,12 @@ fun GlideDropScreen(
         }
     }
 
+    var didRequestPermissions by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        permLauncher.launch(requiredPermissions)
+        if (!didRequestPermissions) {
+            didRequestPermissions = true
+            permLauncher.launch(requiredPermissions)
+        }
     }
 
     // Trigger sending staged items only when user explicitly taps Send
@@ -570,32 +587,40 @@ fun GlideDropScreen(
                 rssi = -55,
                 transport = "BLE + 5GHz P2P"
             )
-        val urisToSend = stagedItems.mapNotNull { it.uri }
-        val textsToSend = stagedItems.mapNotNull { it.textOrUrl }
+        val snapshot = stagedItems.toList()
+        val uriItemIds = snapshot.filter { it.uri != null }.map { it.id }.toSet()
+        val textItemIds = snapshot.filter { it.textOrUrl != null }.map { it.id }.toSet()
+        val urisToSend = snapshot.mapNotNull { it.uri }
+        val textsToSend = snapshot.mapNotNull { it.textOrUrl }
 
         if (urisToSend.isNotEmpty()) {
             node.sendUrisAsync(activePeer, urisToSend) { ok ->
                 if (ok) {
-                    viewModel.removeStagedUriItems()
+                    viewModel.removeStagedItemIds(uriItemIds)
                     if (textsToSend.isNotEmpty()) {
                         node.sendTextSnippetAsync(activePeer, textsToSend.joinToString("\n")) { textOk ->
-                            if (textOk) viewModel.clearStagedItems()
+                            if (textOk) {
+                                viewModel.removeStagedItemIds(textItemIds)
+                                Toast.makeText(appContext, "Sent ${urisToSend.size} file(s) and text", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(appContext, "File(s) sent, but text/link delivery did not complete", Toast.LENGTH_LONG).show()
+                            }
                         }
                     } else {
-                        Toast.makeText(context, "Sent ${urisToSend.size} file(s)", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(appContext, "Sent ${urisToSend.size} file(s)", Toast.LENGTH_SHORT).show()
                     }
                 } else {
-                    Toast.makeText(context, "Transfer did not complete — files kept in selection", Toast.LENGTH_LONG).show()
+                    Toast.makeText(appContext, "Transfer did not complete — files kept in selection", Toast.LENGTH_LONG).show()
                 }
             }
         } else if (textsToSend.isNotEmpty()) {
             val combined = textsToSend.joinToString("\n")
             node.sendTextSnippetAsync(activePeer, combined) { ok ->
                 if (ok) {
-                    viewModel.clearStagedItems()
-                    Toast.makeText(context, "Sent shared link / text", Toast.LENGTH_SHORT).show()
+                    viewModel.removeStagedItemIds(textItemIds)
+                    Toast.makeText(appContext, "Sent shared link / text", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(context, "Transfer did not complete — item kept in selection", Toast.LENGTH_LONG).show()
+                    Toast.makeText(appContext, "Transfer did not complete — item kept in selection", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -604,7 +629,7 @@ fun GlideDropScreen(
     // Incoming Ask Consent Modal
     incomingAsk?.let { ask ->
       if (ask.verificationCode != null) {
-        var rememberPeerChecked by remember(ask) { mutableStateOf(false) }
+        var rememberPeerChecked by rememberSaveable(ask.senderName, ask.verificationCode) { mutableStateOf(false) }
         AlertDialog(
             onDismissRequest = { ask.decision.complete(false) },
             containerColor = c.surfaceOverlay,
@@ -788,7 +813,12 @@ fun GlideDropScreen(
                         TextButton(
                             onClick = {
                                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                val pasted = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                                val clip = cm?.primaryClip
+                                val pasted = if (clip != null && clip.itemCount > 0) {
+                                    clip.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                                } else {
+                                    ""
+                                }
                                 if (pasted.isNotBlank()) viewModel.updateTextSnippetDraft(pasted)
                             }
                         ) {
@@ -1494,7 +1524,8 @@ private fun LiveConnectionBridgeCard(
                         text = if (progress.isConnecting) {
                             "Connecting\u2026"
                         } else if (progress.etaSeconds > 0L) {
-                            "${progress.percent}% · ${progress.etaSeconds}s left"
+                            val etaText = GlideDropNode.formatDuration(progress.etaSeconds)
+                            if (etaText.isNotEmpty()) "${progress.percent}% · $etaText left" else "${progress.percent}%"
                         } else {
                             "${progress.percent}%"
                         },
@@ -2728,7 +2759,7 @@ private fun ReceiveRadarTab(
                     )
                 }
             }
-            items(recentReceived, key = { "${it.timestampMs}-${it.title}" }) { rx ->
+            itemsIndexed(recentReceived, key = { idx, rx -> "$idx-${rx.timestampMs}-${rx.title}" }) { _, rx ->
                 Surface(
                     color = c.surfaceRaised,
                     shape = RoundedCornerShape(14.dp),
@@ -2889,7 +2920,7 @@ private fun TransfersHistoryScreen(
                     .weight(1f),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(filtered, key = { "${it.timestampMs}-${it.title}-${it.isOutgoing}" }) { item ->
+                itemsIndexed(filtered, key = { idx, item -> "$idx-${item.timestampMs}-${item.title}-${item.isOutgoing}" }) { _, item ->
                     Surface(
                         color = c.surfaceRaised,
                         shape = RoundedCornerShape(16.dp),

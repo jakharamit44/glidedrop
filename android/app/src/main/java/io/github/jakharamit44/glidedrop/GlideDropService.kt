@@ -105,10 +105,16 @@ class GlideDropService : Service() {
         activeNode = node
         node.onTransferProgress = { fileName, pct, doneBytes, totalBytes, speedBps, isSending, isConnecting, phase ->
             if (pct >= 100 || pct < 0) {
-                runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
+                synchronized(wakeLockStateLock) {
+                    runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
+                }
                 nm.cancel(NOTIF_ID_PROGRESS)
             } else if (isConnecting) {
-                runCatching { wakeLock?.acquire(15 * 60 * 1000L) }
+                synchronized(wakeLockStateLock) {
+                    if (!isServiceDestroyed) {
+                        runCatching { wakeLock?.acquire(15 * 60 * 1000L) }
+                    }
+                }
                 val connectTitle = if (isSending) "Connecting to GlideDrop peer…" else "Incoming GlideDrop connection…"
                 val connectBody = phase.ifEmpty { fileName }
                 val progressNotif = NotificationCompat.Builder(this, CHANNEL_RX)
@@ -122,13 +128,25 @@ class GlideDropService : Service() {
                     .build()
                 nm.notify(NOTIF_ID_PROGRESS, progressNotif)
             } else {
-                runCatching { wakeLock?.acquire(15 * 60 * 1000L) }
+                synchronized(wakeLockStateLock) {
+                    if (!isServiceDestroyed) {
+                        runCatching { wakeLock?.acquire(15 * 60 * 1000L) }
+                    }
+                }
                 val speedStr = if (speedBps > 0L) " • ${GlideDropNode.formatSpeed(speedBps)}" else ""
+                val etaSec = if (speedBps > 0L && totalBytes > doneBytes && doneBytes >= 65_536L) {
+                    (totalBytes - doneBytes) / speedBps
+                } else {
+                    0L
+                }
+                val etaStr = GlideDropNode.formatDuration(etaSec).let {
+                    if (it.isNotEmpty()) " • $it left" else ""
+                }
                 val actionTitle = if (isSending) "Sending via GlideDrop" else "Receiving via GlideDrop"
                 val progressNotif = NotificationCompat.Builder(this, CHANNEL_RX)
                     .setSmallIcon(R.mipmap.ic_launcher)
                     .setContentTitle("$actionTitle ($pct%)$speedStr")
-                    .setContentText("$fileName (${GlideDropNode.formatBytes(doneBytes)} / ${GlideDropNode.formatBytes(totalBytes)})")
+                    .setContentText("$fileName (${GlideDropNode.formatBytes(doneBytes)} / ${GlideDropNode.formatBytes(totalBytes)})$etaStr")
                     .setProgress(100, pct, false)
                     .setOngoing(true)
                     .setOnlyAlertOnce(true)
@@ -228,15 +246,24 @@ class GlideDropService : Service() {
         }
     }
 
+    private val wakeLockStateLock = Any()
+    @Volatile
+    private var isServiceDestroyed = false
+
     override fun onDestroy() {
-        runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
-        wakeLock = null
+        synchronized(wakeLockStateLock) {
+            isServiceDestroyed = true
+        }
         val node = activeNode ?: peekNode()
         node?.onTransferProgress = null
         node?.onItemReceived = null
         node?.onConsentNotification = null
         node?.stop()
         activeNode = null
+        synchronized(wakeLockStateLock) {
+            runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
+            wakeLock = null
+        }
         runCatching {
             val nm = getSystemService(NotificationManager::class.java)
             nm.cancelAll()

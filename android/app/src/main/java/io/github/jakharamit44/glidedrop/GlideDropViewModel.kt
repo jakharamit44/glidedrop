@@ -118,6 +118,11 @@ class GlideDropViewModel : ViewModel() {
         _stagedItems.update { current -> current.filterNot { it.id == item.id } }
     }
 
+    fun removeStagedItemIds(ids: Set<String>) {
+        if (ids.isEmpty()) return
+        _stagedItems.update { current -> current.filterNot { it.id in ids } }
+    }
+
     fun removeStagedUriItems() {
         _stagedItems.update { current -> current.filterNot { it.uri != null } }
     }
